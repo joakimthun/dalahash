@@ -18,7 +18,8 @@ static bool arg_matches(const RespArg *arg, const char *expected, uint32_t expec
  * receive buffer (zero-copy from the parser), so key/value byte ranges are
  * available without any additional allocation until this function returns. */
 uint32_t command_execute(const RespCommand *cmd, Store *store,
-                         uint8_t *out_buf, [[maybe_unused]] uint32_t out_buf_size) {
+                         uint8_t *out_buf, uint32_t out_buf_size) {
+    (void)out_buf_size; /* used by caller for capacity tracking; per-command bounds TBD */
     if (cmd->argc < 1) return resp_write_error(out_buf, "empty command");
 
     const RespArg *verb = &cmd->args[0];

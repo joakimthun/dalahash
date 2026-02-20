@@ -414,8 +414,9 @@ static int uring_wait(IoBackend *ctx, IoCompletion *out, int max_completions) {
             continue;
         }
 
-        /* Stop emitting to the caller's array but keep consuming IGNORE CQEs. */
-        if (out_count >= max_completions) break;
+        /* Output array full — keep iterating to consume IGNORE CQEs, but leave
+         * data CQEs in the ring (don't increment total_seen) for next wait. */
+        if (out_count >= max_completions) continue;
 
         IoCompletion *c = &out[out_count];
         c->kind = kind;
@@ -430,12 +431,19 @@ static int uring_wait(IoBackend *ctx, IoCompletion *out, int max_completions) {
          * submit_accept or submit_recv again. Always false for non-multishot. */
         c->more = (cqe->flags & IORING_CQE_F_MORE) != 0;
 
-        /* Negative cqe->res is a kernel error (negative errno). Map all errors
-         * to IoCompletion::ERROR for uniform handling upstream. Errors always
-         * terminate multishot, so clear more. */
         if (cqe->res < 0) {
-            c->kind = IoCompletion::ERROR;
-            c->more = false;
+            /* -ENOBUFS on RECV: provided buffer pool exhausted. Not a real
+             * error — the recv should be rearmed once buffers are recycled.
+             * Surface as RECV with null buf so handle_recv can rearm. */
+            if (kind == IoCompletion::RECV && cqe->res == -ENOBUFS) {
+                c->kind = IoCompletion::RECV;
+                c->buf = nullptr;
+                c->buf_len = 0;
+                c->more = false;
+            } else {
+                c->kind = IoCompletion::ERROR;
+                c->more = false;
+            }
             out_count++;
             total_seen++;
             continue;

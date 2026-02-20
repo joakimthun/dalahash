@@ -9,6 +9,7 @@
 
 #include "io.h"
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -25,23 +26,38 @@ struct SimIoBackend {
     std::vector<std::vector<uint8_t>> buffers;      /* holds recv data allocations */
     bool inject_eintr = false;
     bool auto_stop = true;
+    int send_call_count = 0;
+    std::atomic<bool> *running = nullptr; /* set by integration tests for auto_stop */
+
+    /* Failure injection: when > 0, the corresponding submit returns -ENOSPC
+     * and the counter is decremented. */
+    int submit_accept_fail_count = 0;
+    int submit_recv_fail_count = 0;
+    int submit_send_fail_count = 0;
+    int submit_close_fail_count = 0;
 };
 
 static int sim_init(IoBackend *) { return 0; }
 
 static int sim_submit_accept(IoBackend *ctx, int) {
-    reinterpret_cast<SimIoBackend *>(ctx)->accept_armed = true;
+    auto *be = reinterpret_cast<SimIoBackend *>(ctx);
+    if (be->submit_accept_fail_count > 0) { be->submit_accept_fail_count--; return -ENOSPC; }
+    be->accept_armed = true;
     return 0;
 }
 
 static int sim_submit_recv(IoBackend *ctx, int fd) {
-    reinterpret_cast<SimIoBackend *>(ctx)->recv_armed.push_back(fd);
+    auto *be = reinterpret_cast<SimIoBackend *>(ctx);
+    if (be->submit_recv_fail_count > 0) { be->submit_recv_fail_count--; return -ENOSPC; }
+    be->recv_armed.push_back(fd);
     return 0;
 }
 
 static int sim_submit_send(IoBackend *ctx, int fd, const uint8_t *data, uint32_t len) {
     auto *be = reinterpret_cast<SimIoBackend *>(ctx);
+    if (be->submit_send_fail_count > 0) { be->submit_send_fail_count--; return -ENOSPC; }
     be->sent_data[fd].append(reinterpret_cast<const char *>(data), len);
+    be->send_call_count++;
     IoCompletion comp = {};
     comp.kind = IoCompletion::SEND;
     comp.fd = fd;
@@ -52,6 +68,7 @@ static int sim_submit_send(IoBackend *ctx, int fd, const uint8_t *data, uint32_t
 
 static int sim_submit_close(IoBackend *ctx, int fd) {
     auto *be = reinterpret_cast<SimIoBackend *>(ctx);
+    if (be->submit_close_fail_count > 0) { be->submit_close_fail_count--; return -ENOSPC; }
     be->closed_fds.push_back(fd);
     IoCompletion comp = {};
     comp.kind = IoCompletion::CLOSE;
@@ -71,6 +88,10 @@ static int sim_wait(IoBackend *ctx, IoCompletion *out, int max_completions) {
     while (be->pending_index < be->pending.size() && count < max_completions) {
         out[count++] = be->pending[be->pending_index++];
     }
+    /* When all scripted events are drained and auto_stop is set, signal the
+     * worker to exit its event loop. */
+    if (count == 0 && be->auto_stop && be->running)
+        be->running->store(false, std::memory_order_relaxed);
     return count;
 }
 
