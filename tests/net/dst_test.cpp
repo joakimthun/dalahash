@@ -488,6 +488,376 @@ TEST(DSTIntegration, ReassemblyOverflowClosesConnection) {
     EXPECT_TRUE(was_closed);
 }
 
+/* --- Additional unit-level DST tests --- */
+
+TEST(DST, EmptyRecv) {
+    /* recv with 0 bytes of data (buf non-null but len=0). */
+    Store store;
+    Connection *conn = connection_create(10);
+    uint8_t dummy = 0;
+    std::string result = process_recv(conn, &dummy, 0, &store);
+    EXPECT_EQ(result, "");
+    EXPECT_FALSE(conn->closing);
+    connection_destroy(conn);
+}
+
+TEST(DST, MultiplePartialReassemblies) {
+    /* Split a command into 3 chunks across recvs. */
+    Store store;
+    Connection *conn = connection_create(10);
+    std::string full = "*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n";
+    size_t s1 = 5, s2 = 15;
+
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(full.data()),
+                           static_cast<uint32_t>(s1), &store), "");
+    EXPECT_GT(conn->read_len, 0u);
+
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(full.data()) + s1,
+                           static_cast<uint32_t>(s2 - s1), &store), "");
+    EXPECT_GT(conn->read_len, 0u);
+
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(full.data()) + s2,
+                           static_cast<uint32_t>(full.size() - s2), &store), "+OK\r\n");
+    connection_destroy(conn);
+}
+
+TEST(DST, PipelinedMixedCommands) {
+    /* SET, GET, PING, and unknown command in one recv. */
+    Store store;
+    Connection *conn = connection_create(10);
+    std::string data =
+        "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n"
+        "*2\r\n$3\r\nGET\r\n$1\r\nk\r\n"
+        "*1\r\n$4\r\nPING\r\n"
+        "*1\r\n$3\r\nFOO\r\n";
+    std::string result = process_recv(conn, reinterpret_cast<const uint8_t *>(data.data()),
+                                      static_cast<uint32_t>(data.size()), &store);
+    EXPECT_EQ(result, "+OK\r\n$1\r\nv\r\n+PONG\r\n-ERR unknown command\r\n");
+    connection_destroy(conn);
+}
+
+/* --- Additional integration tests --- */
+
+TEST(DSTIntegration, SignalInterruption) {
+    /* inject_eintr=true → worker continues after -EINTR from wait. */
+    SimIoBackend sim_setup;
+    std::string ping = "*1\r\n$4\r\nPING\r\n";
+
+    SimIoBackend sim;
+    sim.inject_eintr = true; /* first wait returns -EINTR */
+    sim.pending.push_back(sim_accept(10));
+    sim.pending.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
+
+    std::atomic<bool> running{true};
+    sim.running = &running;
+
+    WorkerConfig config = {};
+    config.cpu_id = 0;
+    config.ops = sim_io_ops();
+    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.running = &running;
+    config.skip_setup = true;
+    config.listen_fd = 0;
+
+    worker_run(&config);
+    EXPECT_EQ(sim.sent_data[10], "+PONG\r\n");
+}
+
+TEST(DSTIntegration, MultipleConnectionsViaWorkerRun) {
+    SimIoBackend sim_setup;
+    std::string set1 = "*3\r\n$3\r\nSET\r\n$2\r\nk1\r\n$2\r\nv1\r\n";
+    std::string set2 = "*3\r\n$3\r\nSET\r\n$2\r\nk2\r\n$2\r\nv2\r\n";
+    std::string get1 = "*2\r\n$3\r\nGET\r\n$2\r\nk1\r\n";
+    std::string get2 = "*2\r\n$3\r\nGET\r\n$2\r\nk2\r\n";
+
+    std::vector<IoCompletion> events;
+    events.push_back(sim_accept(10));
+    events.push_back(sim_accept(11));
+    events.push_back(sim_recv(&sim_setup, 10, set1.data(), static_cast<uint32_t>(set1.size())));
+    events.push_back(sim_recv(&sim_setup, 11, set2.data(), static_cast<uint32_t>(set2.size())));
+    events.push_back(sim_recv(&sim_setup, 10, get1.data(), static_cast<uint32_t>(get1.size())));
+    events.push_back(sim_recv(&sim_setup, 11, get2.data(), static_cast<uint32_t>(get2.size())));
+
+    SimIoBackend result = run_worker_sim(events);
+    /* Each connection should have its own SET OK + GET response. */
+    EXPECT_NE(result.sent_data[10].find("+OK\r\n"), std::string::npos);
+    EXPECT_NE(result.sent_data[10].find("$2\r\nv1\r\n"), std::string::npos);
+    EXPECT_NE(result.sent_data[11].find("+OK\r\n"), std::string::npos);
+    EXPECT_NE(result.sent_data[11].find("$2\r\nv2\r\n"), std::string::npos);
+}
+
+TEST(DSTIntegration, ErrorCompletionClosesConnection) {
+    std::vector<IoCompletion> events;
+    events.push_back(sim_accept(10));
+
+    IoCompletion err = {};
+    err.kind = IoCompletion::ERROR;
+    err.fd = 10;
+    err.result = -EIO;
+    events.push_back(err);
+
+    SimIoBackend result = run_worker_sim(events);
+    bool was_closed = false;
+    for (int fd : result.closed_fds) {
+        if (fd == 10) { was_closed = true; break; }
+    }
+    EXPECT_TRUE(was_closed);
+}
+
+TEST(DSTIntegration, IgnoreCompletionSkipped) {
+    SimIoBackend sim_setup;
+    std::string ping = "*1\r\n$4\r\nPING\r\n";
+
+    std::vector<IoCompletion> events;
+    events.push_back(sim_accept(10));
+
+    /* Push IGNORE completion between accept and recv. */
+    IoCompletion ignore = {};
+    ignore.kind = IoCompletion::IGNORE;
+    ignore.fd = 10;
+    events.push_back(ignore);
+
+    events.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
+
+    SimIoBackend result = run_worker_sim(events);
+    /* Worker should continue normally — PING response should be sent. */
+    EXPECT_EQ(result.sent_data[10], "+PONG\r\n");
+    /* fd 10 should NOT be closed. */
+    for (int fd : result.closed_fds) {
+        EXPECT_NE(fd, 10);
+    }
+}
+
+TEST(DSTIntegration, SendFailClosesConnection) {
+    SimIoBackend sim_setup;
+    std::string ping = "*1\r\n$4\r\nPING\r\n";
+
+    SimIoBackend sim;
+    sim.pending.push_back(sim_accept(10));
+    sim.pending.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
+    sim.submit_send_fail_count = 1; /* send after recv fails */
+
+    std::atomic<bool> running{true};
+    sim.running = &running;
+
+    WorkerConfig config = {};
+    config.cpu_id = 0;
+    config.ops = sim_io_ops();
+    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.running = &running;
+    config.skip_setup = true;
+    config.listen_fd = 0;
+
+    worker_run(&config);
+
+    bool was_closed = false;
+    for (int fd : sim.closed_fds) {
+        if (fd == 10) { was_closed = true; break; }
+    }
+    EXPECT_TRUE(was_closed);
+}
+
+TEST(DSTIntegration, PendingCloseRetrySucceeds) {
+    SimIoBackend sim_setup;
+    std::string bad = "GARBAGE\r\n";
+
+    SimIoBackend sim;
+    sim.pending.push_back(sim_accept(10));
+    sim.pending.push_back(sim_recv(&sim_setup, 10, bad.data(), static_cast<uint32_t>(bad.size())));
+    sim.submit_close_fail_count = 1; /* first close fails with -ENOSPC */
+    sim.submit_close_fail_errno = -ENOSPC;
+
+    std::atomic<bool> running{true};
+    sim.running = &running;
+
+    WorkerConfig config = {};
+    config.cpu_id = 0;
+    config.ops = sim_io_ops();
+    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.running = &running;
+    config.skip_setup = true;
+    config.listen_fd = 0;
+
+    worker_run(&config);
+
+    /* Close should eventually succeed on retry. */
+    bool was_closed = false;
+    for (int fd : sim.closed_fds) {
+        if (fd == 10) { was_closed = true; break; }
+    }
+    EXPECT_TRUE(was_closed);
+    /* Should have been attempted at least twice. */
+    EXPECT_GE(sim.submit_close_call_count, 2);
+}
+
+TEST(DSTIntegration, RecvAfterMultishotTermination) {
+    /* Multishot recv terminates (more=false), worker should rearm. */
+    SimIoBackend sim_setup;
+    std::string ping = "*1\r\n$4\r\nPING\r\n";
+
+    std::vector<uint8_t> ping_buf(ping.begin(), ping.end());
+
+    IoCompletion recv_nomore = {};
+    recv_nomore.kind = IoCompletion::RECV;
+    recv_nomore.fd = 10;
+    recv_nomore.result = static_cast<int>(ping_buf.size());
+    recv_nomore.buf = ping_buf.data();
+    recv_nomore.buf_len = static_cast<uint32_t>(ping_buf.size());
+    recv_nomore.buf_id = 99;
+    recv_nomore.more = false; /* multishot terminated */
+
+    std::vector<IoCompletion> events;
+    events.push_back(sim_accept(10));
+    events.push_back(recv_nomore);
+
+    SimIoBackend result = run_worker_sim(events);
+    EXPECT_EQ(result.sent_data[10], "+PONG\r\n");
+    /* recv should have been rearmed for fd 10. */
+    bool rearmed = false;
+    for (int fd : result.recv_armed) {
+        if (fd == 10) { rearmed = true; break; }
+    }
+    EXPECT_TRUE(rearmed);
+}
+
+TEST(DSTIntegration, SendResultZeroClosesConnection) {
+    SimIoBackend sim_setup;
+    std::string ping = "*1\r\n$4\r\nPING\r\n";
+
+    SimIoBackend sim;
+    sim.pending.push_back(sim_accept(10));
+    sim.pending.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
+    sim.copy_send_on_wait = true;
+    sim.scripted_send_results = {0}; /* zero bytes sent → error */
+
+    std::atomic<bool> running{true};
+    sim.running = &running;
+
+    WorkerConfig config = {};
+    config.cpu_id = 0;
+    config.ops = sim_io_ops();
+    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.running = &running;
+    config.skip_setup = true;
+    config.listen_fd = 0;
+
+    worker_run(&config);
+
+    bool was_closed = false;
+    for (int fd : sim.closed_fds) {
+        if (fd == 10) { was_closed = true; break; }
+    }
+    EXPECT_TRUE(was_closed);
+}
+
+TEST(DSTIntegration, SendResultNegativeClosesConnection) {
+    SimIoBackend sim_setup;
+    std::string ping = "*1\r\n$4\r\nPING\r\n";
+
+    SimIoBackend sim;
+    sim.pending.push_back(sim_accept(10));
+    sim.pending.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
+    sim.copy_send_on_wait = true;
+    sim.scripted_send_results = {-1}; /* negative → error */
+
+    std::atomic<bool> running{true};
+    sim.running = &running;
+
+    WorkerConfig config = {};
+    config.cpu_id = 0;
+    config.ops = sim_io_ops();
+    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.running = &running;
+    config.skip_setup = true;
+    config.listen_fd = 0;
+
+    worker_run(&config);
+
+    bool was_closed = false;
+    for (int fd : sim.closed_fds) {
+        if (fd == 10) { was_closed = true; break; }
+    }
+    EXPECT_TRUE(was_closed);
+}
+
+TEST(DSTIntegration, SendResultOverrunClosesConnection) {
+    SimIoBackend sim_setup;
+    std::string ping = "*1\r\n$4\r\nPING\r\n";
+
+    SimIoBackend sim;
+    sim.pending.push_back(sim_accept(10));
+    sim.pending.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
+    sim.copy_send_on_wait = true;
+    sim.scripted_send_results = {9999}; /* > response len → overrun */
+
+    std::atomic<bool> running{true};
+    sim.running = &running;
+
+    WorkerConfig config = {};
+    config.cpu_id = 0;
+    config.ops = sim_io_ops();
+    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.running = &running;
+    config.skip_setup = true;
+    config.listen_fd = 0;
+
+    worker_run(&config);
+
+    bool was_closed = false;
+    for (int fd : sim.closed_fds) {
+        if (fd == 10) { was_closed = true; break; }
+    }
+    EXPECT_TRUE(was_closed);
+}
+
+TEST(DSTIntegration, MultipleChunkedSends) {
+    /* Large response split across 3 partial sends. */
+    SimIoBackend sim_setup;
+    std::string pings;
+    for (int i = 0; i < 5; i++) pings += "*1\r\n$4\r\nPING\r\n";
+    /* 5 x "+PONG\r\n" = 35 bytes total response */
+
+    SimIoBackend sim;
+    sim.pending.push_back(sim_accept(10));
+    sim.pending.push_back(sim_recv(&sim_setup, 10, pings.data(), static_cast<uint32_t>(pings.size())));
+    sim.copy_send_on_wait = true;
+    sim.scripted_send_results = {10, 15, 10}; /* 10 + 15 + 10 = 35 bytes */
+
+    std::atomic<bool> running{true};
+    sim.running = &running;
+
+    WorkerConfig config = {};
+    config.cpu_id = 0;
+    config.ops = sim_io_ops();
+    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.running = &running;
+    config.skip_setup = true;
+    config.listen_fd = 0;
+
+    worker_run(&config);
+
+    std::string expected;
+    for (int i = 0; i < 5; i++) expected += "+PONG\r\n";
+    EXPECT_EQ(sim.sent_data[10], expected);
+    EXPECT_EQ(sim.send_call_count, 3);
+}
+
+TEST(DSTIntegration, BufferRecycling) {
+    SimIoBackend sim_setup;
+    std::string ping = "*1\r\n$4\r\nPING\r\n";
+
+    std::vector<IoCompletion> events;
+    events.push_back(sim_accept(10));
+    /* Two recv events with distinct buf_ids. */
+    events.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
+    events.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
+
+    SimIoBackend result = run_worker_sim(events);
+
+    /* Both buf_ids should have been recycled. */
+    EXPECT_GE(result.recycled_buf_ids.size(), 2u);
+}
+
 TEST(DSTIntegration, CloseRetryOnlyOnENOSPC) {
     SimIoBackend sim_setup;
     std::string bad = "GARBAGE\r\n";

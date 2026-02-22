@@ -142,3 +142,188 @@ TEST(RespFormat, WriteError) {
     uint32_t n = resp_write_error(buf, "unknown command");
     EXPECT_EQ(std::string(reinterpret_cast<char *>(buf), n), "-ERR unknown command\r\n");
 }
+
+/* --- Additional parse edge cases --- */
+
+TEST(RespParse, MaxArgsBoundary) {
+    /* RESP_MAX_ARGS=8: exactly 8 args should succeed. */
+    std::string input = "*8\r\n";
+    for (int i = 0; i < 8; i++) input += "$1\r\nx\r\n";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::OK);
+    EXPECT_EQ(cmd.argc, 8);
+    EXPECT_EQ(consumed, input.size());
+}
+
+TEST(RespParse, TooManyArgs) {
+    /* 9 args exceeds RESP_MAX_ARGS=8 → ERROR. */
+    std::string input = "*9\r\n";
+    for (int i = 0; i < 9; i++) input += "$1\r\nx\r\n";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::ERROR);
+}
+
+TEST(RespParse, ZeroLengthBulkString) {
+    std::string input = "*2\r\n$3\r\nSET\r\n$0\r\n\r\n";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::OK);
+    EXPECT_EQ(cmd.args[1].len, 0u);
+}
+
+TEST(RespParse, ArgcZero) {
+    std::string input = "*0\r\n";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::ERROR);
+}
+
+TEST(RespParse, IncompleteArrayCount) {
+    /* Just '*' with no digits or CRLF. */
+    std::string input = "*";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::INCOMPLETE);
+    EXPECT_EQ(consumed, 0u);
+}
+
+TEST(RespParse, IncompleteBulkLength) {
+    /* Array header complete, but bulk string length prefix cut short. */
+    std::string input = "*1\r\n$";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::INCOMPLETE);
+    EXPECT_EQ(consumed, 0u);
+}
+
+TEST(RespParse, IncompleteBulkPayload) {
+    /* Only 2 of 5 payload bytes present. */
+    std::string input = "*1\r\n$5\r\nhe";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::INCOMPLETE);
+    EXPECT_EQ(consumed, 0u);
+}
+
+TEST(RespParse, MultipleIncompleteResumes) {
+    /* Simulate 3 successive partial chunks: only the third completes the command. */
+    std::string full = "*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n";
+    size_t split1 = 3;  /* "*2\r" */
+    size_t split2 = 12; /* "*2\r\n$3\r\nGET\r" */
+
+    RespCommand cmd;
+    uint32_t consumed = 0;
+
+    /* Chunk 1: incomplete */
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(full.data()),
+                         static_cast<uint32_t>(split1), &cmd, &consumed),
+              RespParseResult::INCOMPLETE);
+    EXPECT_EQ(consumed, 0u);
+
+    /* Chunk 1+2: still incomplete */
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(full.data()),
+                         static_cast<uint32_t>(split2), &cmd, &consumed),
+              RespParseResult::INCOMPLETE);
+    EXPECT_EQ(consumed, 0u);
+
+    /* Full message: OK */
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(full.data()),
+                         static_cast<uint32_t>(full.size()), &cmd, &consumed),
+              RespParseResult::OK);
+    EXPECT_EQ(consumed, full.size());
+    EXPECT_TRUE(arg_eq(cmd.args[0], "GET"));
+}
+
+TEST(RespParse, ConsumedIsZeroOnIncomplete) {
+    std::string input = "*2\r\n$3\r\nGET\r\n";
+    RespCommand cmd;
+    uint32_t consumed = 42; /* pre-set to non-zero */
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::INCOMPLETE);
+    EXPECT_EQ(consumed, 0u);
+}
+
+TEST(RespParse, ConsumedMatchesFull) {
+    std::string input = "*1\r\n$4\r\nPING\r\n";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::OK);
+    EXPECT_EQ(consumed, static_cast<uint32_t>(input.size()));
+}
+
+TEST(RespParse, BinaryData) {
+    /* Bulk string containing \0, \r, \n embedded bytes. */
+    uint8_t payload[] = {'h', 0x00, '\r', '\n', 'o'};
+    std::string input = "*1\r\n$5\r\n";
+    input.append(reinterpret_cast<char *>(payload), 5);
+    input += "\r\n";
+
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::OK);
+    EXPECT_EQ(cmd.args[0].len, 5u);
+    EXPECT_EQ(std::memcmp(cmd.args[0].data, payload, 5), 0);
+}
+
+TEST(RespParse, SingleByteChunk) {
+    /* Only the first byte '*' → INCOMPLETE. */
+    std::string input = "*";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::INCOMPLETE);
+}
+
+/* --- Additional format edge cases --- */
+
+TEST(RespFormat, WriteBulkLargeLen) {
+    /* Bulk string with multi-digit length prefix. */
+    std::string payload(12345, 'A');
+    std::vector<uint8_t> buf(12345 + 32);
+    uint32_t n = resp_write_bulk(buf.data(),
+                                 reinterpret_cast<const uint8_t *>(payload.data()),
+                                 static_cast<uint32_t>(payload.size()));
+    std::string result(reinterpret_cast<char *>(buf.data()), n);
+    EXPECT_TRUE(result.starts_with("$12345\r\n"));
+    EXPECT_TRUE(result.ends_with("\r\n"));
+    EXPECT_EQ(n, 8u + 12345u + 2u); /* "$12345\r\n" + data + "\r\n" */
+}
+
+TEST(RespFormat, WriteErrorLong) {
+    /* Error message near 512-byte truncation boundary. */
+    std::string long_msg(500, 'X');
+    uint8_t buf[600];
+    uint32_t n = resp_write_error(buf, long_msg.c_str());
+    std::string result(reinterpret_cast<char *>(buf), n);
+    EXPECT_TRUE(result.starts_with("-ERR "));
+    /* snprintf truncates at 512 total including null → 511 chars max */
+    EXPECT_LE(n, 511u);
+}
+
+TEST(RespFormat, WriteErrorEmpty) {
+    uint8_t buf[128];
+    uint32_t n = resp_write_error(buf, "");
+    EXPECT_EQ(std::string(reinterpret_cast<char *>(buf), n), "-ERR \r\n");
+}
