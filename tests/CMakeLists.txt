@@ -32,7 +32,17 @@ target_include_directories(dst_tests PRIVATE
 )
 target_link_libraries(dst_tests dalahash_lib GTest::gtest_main)
 
+# Real I/O integration tests — starts dalahash and talks over TCP via redis-cli
+add_executable(io_uring_integration_tests
+    net/io_uring_integration_test.cpp
+)
+target_link_libraries(io_uring_integration_tests GTest::gtest_main)
+target_compile_definitions(io_uring_integration_tests PRIVATE
+    DALAHASH_BINARY_PATH="$<TARGET_FILE:dalahash>"
+)
+
 # GoogleTest integration — auto-discovers TEST() macros and registers them with CTest
 include(GoogleTest)
-gtest_discover_tests(dalahash_tests)
-gtest_discover_tests(dst_tests)
+gtest_discover_tests(dalahash_tests DISCOVERY_MODE PRE_TEST)
+gtest_discover_tests(dst_tests DISCOVERY_MODE PRE_TEST)
+gtest_discover_tests(io_uring_integration_tests DISCOVERY_MODE PRE_TEST)

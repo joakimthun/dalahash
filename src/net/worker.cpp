@@ -325,15 +325,27 @@ static int create_listen_socket(uint16_t port) {
     int one = 1, zero = 0;
     /* SO_REUSEADDR (socket(7)): allows bind() even if the address was recently
      * used by a socket in TIME_WAIT state. Useful for fast server restarts. */
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) < 0) {
+        std::perror("setsockopt(SO_REUSEADDR)");
+        close(fd);
+        return -1;
+    }
     /* SO_REUSEPORT (socket(7)): allows multiple sockets to bind to the same
      * port. The kernel load-balances incoming connections across all sockets
      * bound to the port using a consistent 4-tuple hash. Each worker thread
      * gets its own listen socket — no shared accept queue, no lock contention. */
-    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) < 0) {
+        std::perror("setsockopt(SO_REUSEPORT)");
+        close(fd);
+        return -1;
+    }
     /* IPV6_V6ONLY=0 (ipv6(7)): enables dual-stack — this IPv6 socket also
      * accepts IPv4 connections (mapped to ::ffff:x.x.x.x addresses). */
-    setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof(zero));
+    if (setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof(zero)) < 0) {
+        std::perror("setsockopt(IPV6_V6ONLY)");
+        close(fd);
+        return -1;
+    }
 
     struct sockaddr_in6 addr = {};
     addr.sin6_family = AF_INET6;
@@ -719,7 +731,8 @@ int worker_run(WorkerConfig *config) {
     if (config->skip_setup) {
         listen_fd = config->listen_fd;
     } else {
-        pin_to_core(config->cpu_id);
+        int pin_ret = pin_to_core(config->cpu_id);
+        if (pin_ret < 0) return pin_ret;
         std::fprintf(stderr, "worker %d: starting on core %d, port %d\n",
                      config->cpu_id, config->cpu_id, config->port);
         listen_fd = create_listen_socket(config->port);
