@@ -1,4 +1,4 @@
-/* dst_test.cpp — Deterministic simulation tests using SimIoBackend. */
+// dst_test.cpp — Deterministic simulation tests using SimIoBackend.
 
 #include "command.h"
 #include "connection.h"
@@ -11,7 +11,7 @@
 #include <gtest/gtest.h>
 #include <string>
 
-/* Mirrors worker's handle_recv: parse RESP, execute, return response. */
+// Mirrors worker's handle_recv: parse RESP, execute, return response.
 static std::string process_recv(Connection *conn, const uint8_t *data, uint32_t len,
                                  Store *store) {
     std::string response;
@@ -145,14 +145,14 @@ TEST(DST, DeepPipelineCoalesced) {
     IoOps ops = sim_io_ops();
     auto *ctx = reinterpret_cast<IoBackend *>(&sim);
 
-    /* Build 10 pipelined PINGs. */
+    // Build 10 pipelined PINGs.
     std::string pings;
     for (int i = 0; i < 10; i++) pings += "*1\r\n$4\r\nPING\r\n";
 
     sim.pending.push_back(sim_accept(10));
     sim.pending.push_back(sim_recv(&sim, 10, pings.data(), static_cast<uint32_t>(pings.size())));
 
-    /* Drive completions through worker_run. */
+    // Drive completions through worker_run.
     Connection *conns[MAX_CONNECTIONS] = {};
     Store store = {};
     IoCompletion completions[256];
@@ -166,17 +166,17 @@ TEST(DST, DeepPipelineCoalesced) {
         }
     }
 
-    /* Process the recv through the real code path — but we can't call
-     * handle_recv directly (static). Phase 5 adds integration tests via
-     * worker_run. For now, verify via sim backend send capture. */
-    /* Push recv event again so sim_wait returns it. */
+        //  Process the recv through the real code path — but we can't call
+    // handle_recv directly (static). Phase 5 adds integration tests via
+    // worker_run. For now, verify via sim backend send capture.
+    // Push recv event again so sim_wait returns it.
     sim.pending_index = 0;
     sim.pending.clear();
     sim.pending.push_back(sim_recv(&sim, 10, pings.data(), static_cast<uint32_t>(pings.size())));
 
     n = ops.wait(ctx, completions, 256);
 
-    /* Manually exercise the pipeline logic matching worker.cpp handle_recv. */
+    // Manually exercise the pipeline logic matching worker.cpp handle_recv.
     IoCompletion *comp = &completions[0];
     Connection *conn = conns[10];
     const uint8_t *parse_buf = comp->buf;
@@ -199,12 +199,12 @@ TEST(DST, DeepPipelineCoalesced) {
         }
     }
 
-    /* All 10 PINGs should produce a single coalesced response. */
+    // All 10 PINGs should produce a single coalesced response.
     std::string expected;
     for (int i = 0; i < 10; i++) expected += "+PONG\r\n";
     EXPECT_EQ(std::string(reinterpret_cast<char *>(response), resp_offset), expected);
 
-    /* Verify it would be 1 send call (resp_offset > 0 → one submit_send). */
+    // Verify it would be 1 send call (resp_offset > 0 → one submit_send).
     sim.sent_data.clear();
     ops.submit_send(ctx, 10, response, resp_offset);
     EXPECT_EQ(sim.sent_data[10], expected);
@@ -226,9 +226,9 @@ TEST(DST, MultipleConnections) {
     connection_destroy(c2);
 }
 
-/* --- Integration tests: exercise real worker_run with SimIoBackend --- */
+// --- Integration tests: exercise real worker_run with SimIoBackend ---
 
-/* Helper: run worker_run with scripted events, return sim backend for assertions. */
+// Helper: run worker_run with scripted events, return sim backend for assertions.
 static SimIoBackend run_worker_sim(std::vector<IoCompletion> events) {
     SimIoBackend sim;
     sim.pending = std::move(events);
@@ -287,12 +287,12 @@ TEST(DSTIntegration, PipelinedPingsViaWorkerRun) {
     std::string expected;
     for (int i = 0; i < 10; i++) expected += "+PONG\r\n";
     EXPECT_EQ(result.sent_data[10], expected);
-    /* Coalesced into 1 send call. */
+    // Coalesced into 1 send call.
     EXPECT_EQ(result.send_call_count, 1);
 }
 
 TEST(DSTIntegration, BufferExhaustionRearms) {
-    /* Simulate -ENOBUFS: RECV with null buf, more=false. */
+    // Simulate -ENOBUFS: RECV with null buf, more=false.
     IoCompletion nobufs = {};
     nobufs.kind = IoCompletion::RECV;
     nobufs.fd = 10;
@@ -308,9 +308,9 @@ TEST(DSTIntegration, BufferExhaustionRearms) {
 
     SimIoBackend result = run_worker_sim(events);
 
-    /* Connection should NOT be closed — recv should be rearmed. */
+    // Connection should NOT be closed — recv should be rearmed.
     EXPECT_TRUE(result.closed_fds.empty());
-    /* recv_armed should contain fd 10 (the rearm). */
+    // recv_armed should contain fd 10 (the rearm).
     bool rearmed = false;
     for (int fd : result.recv_armed) {
         if (fd == 10) { rearmed = true; break; }
@@ -320,11 +320,11 @@ TEST(DSTIntegration, BufferExhaustionRearms) {
 
 TEST(DSTIntegration, AcceptRearmOnSQFull) {
     SimIoBackend sim_setup;
-    /* First accept will trigger submit_recv which will succeed.
-     * But make the multishot accept terminate (more=false) and have
-     * submit_accept fail once. */
+        //  First accept will trigger submit_recv which will succeed.
+    // But make the multishot accept terminate (more=false) and have
+    // submit_accept fail once.
     IoCompletion accept_nomore = sim_accept(10);
-    accept_nomore.more = false; /* triggers rearm */
+    accept_nomore.more = false; // triggers rearm
 
     std::string ping = "*1\r\n$4\r\nPING\r\n";
 
@@ -334,7 +334,7 @@ TEST(DSTIntegration, AcceptRearmOnSQFull) {
 
     SimIoBackend sim;
     sim.pending = events;
-    sim.submit_accept_fail_count = 1; /* first rearm fails */
+    sim.submit_accept_fail_count = 1; // first rearm fails
     std::atomic<bool> running{true};
     sim.running = &running;
 
@@ -348,19 +348,19 @@ TEST(DSTIntegration, AcceptRearmOnSQFull) {
 
     worker_run(&config);
 
-    /* accept_armed should be true — retried on next iteration. */
+    // accept_armed should be true — retried on next iteration.
     EXPECT_TRUE(sim.accept_armed);
     EXPECT_EQ(sim.sent_data[10], "+PONG\r\n");
 }
 
 TEST(DSTIntegration, RecvFailClosesConnection) {
-    /* Accept a connection, but make submit_recv fail → connection should close. */
+    // Accept a connection, but make submit_recv fail → connection should close.
     std::vector<IoCompletion> events;
     events.push_back(sim_accept(10));
 
     SimIoBackend sim;
     sim.pending = events;
-    sim.submit_recv_fail_count = 1; /* recv after accept fails */
+    sim.submit_recv_fail_count = 1; // recv after accept fails
     std::atomic<bool> running{true};
     sim.running = &running;
 
@@ -374,7 +374,7 @@ TEST(DSTIntegration, RecvFailClosesConnection) {
 
     worker_run(&config);
 
-    /* Connection fd 10 should have been closed. */
+    // Connection fd 10 should have been closed.
     bool was_closed = false;
     for (int fd : sim.closed_fds) {
         if (fd == 10) { was_closed = true; break; }
@@ -398,7 +398,7 @@ TEST(DSTIntegration, PartialReassemblyViaWorkerRun) {
 
 TEST(DSTIntegration, AcceptInitialArmFailureRetries) {
     SimIoBackend sim;
-    sim.submit_accept_fail_count = 1; /* initial arm fails */
+    sim.submit_accept_fail_count = 1; // initial arm fails
     std::atomic<bool> running{true};
     sim.running = &running;
 
@@ -423,7 +423,7 @@ TEST(DSTIntegration, SendBuffersOwnedAcrossAsyncCompletion) {
     sim.pending.push_back(sim_accept(10));
     sim.pending.push_back(sim_recv(&sim_setup, 10, set_cmd.data(), static_cast<uint32_t>(set_cmd.size())));
     sim.pending.push_back(sim_recv(&sim_setup, 10, get_cmd.data(), static_cast<uint32_t>(get_cmd.size())));
-    sim.copy_send_on_wait = true; /* read user buffers when SEND CQEs are delivered */
+    sim.copy_send_on_wait = true; // read user buffers when SEND CQEs are delivered
 
     std::atomic<bool> running{true};
     sim.running = &running;
@@ -448,7 +448,7 @@ TEST(DSTIntegration, PartialSendResubmitsRemainingBytes) {
     sim.pending.push_back(sim_accept(10));
     sim.pending.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
     sim.copy_send_on_wait = true;
-    sim.scripted_send_results = {3, 4}; /* +PONG\\r\\n -> 3 bytes then 4 bytes */
+    sim.scripted_send_results = {3, 4}; // +PONG\\r\\n -> 3 bytes then 4 bytes
 
     std::atomic<bool> running{true};
     sim.running = &running;
@@ -488,10 +488,10 @@ TEST(DSTIntegration, ReassemblyOverflowClosesConnection) {
     EXPECT_TRUE(was_closed);
 }
 
-/* --- Additional unit-level DST tests --- */
+// --- Additional unit-level DST tests ---
 
 TEST(DST, EmptyRecv) {
-    /* recv with 0 bytes of data (buf non-null but len=0). */
+    // recv with 0 bytes of data (buf non-null but len=0).
     Store store;
     Connection *conn = connection_create(10);
     uint8_t dummy = 0;
@@ -502,7 +502,7 @@ TEST(DST, EmptyRecv) {
 }
 
 TEST(DST, MultiplePartialReassemblies) {
-    /* Split a command into 3 chunks across recvs. */
+    // Split a command into 3 chunks across recvs.
     Store store;
     Connection *conn = connection_create(10);
     std::string full = "*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n";
@@ -522,7 +522,7 @@ TEST(DST, MultiplePartialReassemblies) {
 }
 
 TEST(DST, PipelinedMixedCommands) {
-    /* SET, GET, PING, and unknown command in one recv. */
+    // SET, GET, PING, and unknown command in one recv.
     Store store;
     Connection *conn = connection_create(10);
     std::string data =
@@ -536,15 +536,15 @@ TEST(DST, PipelinedMixedCommands) {
     connection_destroy(conn);
 }
 
-/* --- Additional integration tests --- */
+// --- Additional integration tests ---
 
 TEST(DSTIntegration, SignalInterruption) {
-    /* inject_eintr=true → worker continues after -EINTR from wait. */
+    // inject_eintr=true → worker continues after -EINTR from wait.
     SimIoBackend sim_setup;
     std::string ping = "*1\r\n$4\r\nPING\r\n";
 
     SimIoBackend sim;
-    sim.inject_eintr = true; /* first wait returns -EINTR */
+    sim.inject_eintr = true; // first wait returns -EINTR
     sim.pending.push_back(sim_accept(10));
     sim.pending.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
 
@@ -579,7 +579,7 @@ TEST(DSTIntegration, MultipleConnectionsViaWorkerRun) {
     events.push_back(sim_recv(&sim_setup, 11, get2.data(), static_cast<uint32_t>(get2.size())));
 
     SimIoBackend result = run_worker_sim(events);
-    /* Each connection should have its own SET OK + GET response. */
+    // Each connection should have its own SET OK + GET response.
     EXPECT_NE(result.sent_data[10].find("+OK\r\n"), std::string::npos);
     EXPECT_NE(result.sent_data[10].find("$2\r\nv1\r\n"), std::string::npos);
     EXPECT_NE(result.sent_data[11].find("+OK\r\n"), std::string::npos);
@@ -611,7 +611,7 @@ TEST(DSTIntegration, IgnoreCompletionSkipped) {
     std::vector<IoCompletion> events;
     events.push_back(sim_accept(10));
 
-    /* Push IGNORE completion between accept and recv. */
+    // Push IGNORE completion between accept and recv.
     IoCompletion ignore = {};
     ignore.kind = IoCompletion::IGNORE;
     ignore.fd = 10;
@@ -620,9 +620,9 @@ TEST(DSTIntegration, IgnoreCompletionSkipped) {
     events.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
 
     SimIoBackend result = run_worker_sim(events);
-    /* Worker should continue normally — PING response should be sent. */
+    // Worker should continue normally — PING response should be sent.
     EXPECT_EQ(result.sent_data[10], "+PONG\r\n");
-    /* fd 10 should NOT be closed. */
+    // fd 10 should NOT be closed.
     for (int fd : result.closed_fds) {
         EXPECT_NE(fd, 10);
     }
@@ -635,7 +635,7 @@ TEST(DSTIntegration, SendFailClosesConnection) {
     SimIoBackend sim;
     sim.pending.push_back(sim_accept(10));
     sim.pending.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
-    sim.submit_send_fail_count = 1; /* send after recv fails */
+    sim.submit_send_fail_count = 1; // send after recv fails
 
     std::atomic<bool> running{true};
     sim.running = &running;
@@ -664,7 +664,7 @@ TEST(DSTIntegration, PendingCloseRetrySucceeds) {
     SimIoBackend sim;
     sim.pending.push_back(sim_accept(10));
     sim.pending.push_back(sim_recv(&sim_setup, 10, bad.data(), static_cast<uint32_t>(bad.size())));
-    sim.submit_close_fail_count = 1; /* first close fails with -ENOSPC */
+    sim.submit_close_fail_count = 1; // first close fails with -ENOSPC
     sim.submit_close_fail_errno = -ENOSPC;
 
     std::atomic<bool> running{true};
@@ -680,18 +680,18 @@ TEST(DSTIntegration, PendingCloseRetrySucceeds) {
 
     worker_run(&config);
 
-    /* Close should eventually succeed on retry. */
+    // Close should eventually succeed on retry.
     bool was_closed = false;
     for (int fd : sim.closed_fds) {
         if (fd == 10) { was_closed = true; break; }
     }
     EXPECT_TRUE(was_closed);
-    /* Should have been attempted at least twice. */
+    // Should have been attempted at least twice.
     EXPECT_GE(sim.submit_close_call_count, 2);
 }
 
 TEST(DSTIntegration, RecvAfterMultishotTermination) {
-    /* Multishot recv terminates (more=false), worker should rearm. */
+    // Multishot recv terminates (more=false), worker should rearm.
     SimIoBackend sim_setup;
     std::string ping = "*1\r\n$4\r\nPING\r\n";
 
@@ -704,7 +704,7 @@ TEST(DSTIntegration, RecvAfterMultishotTermination) {
     recv_nomore.buf = ping_buf.data();
     recv_nomore.buf_len = static_cast<uint32_t>(ping_buf.size());
     recv_nomore.buf_id = 99;
-    recv_nomore.more = false; /* multishot terminated */
+    recv_nomore.more = false; // multishot terminated
 
     std::vector<IoCompletion> events;
     events.push_back(sim_accept(10));
@@ -712,7 +712,7 @@ TEST(DSTIntegration, RecvAfterMultishotTermination) {
 
     SimIoBackend result = run_worker_sim(events);
     EXPECT_EQ(result.sent_data[10], "+PONG\r\n");
-    /* recv should have been rearmed for fd 10. */
+    // recv should have been rearmed for fd 10.
     bool rearmed = false;
     for (int fd : result.recv_armed) {
         if (fd == 10) { rearmed = true; break; }
@@ -728,7 +728,7 @@ TEST(DSTIntegration, SendResultZeroClosesConnection) {
     sim.pending.push_back(sim_accept(10));
     sim.pending.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
     sim.copy_send_on_wait = true;
-    sim.scripted_send_results = {0}; /* zero bytes sent → error */
+    sim.scripted_send_results = {0}; // zero bytes sent → error
 
     std::atomic<bool> running{true};
     sim.running = &running;
@@ -758,7 +758,7 @@ TEST(DSTIntegration, SendResultNegativeClosesConnection) {
     sim.pending.push_back(sim_accept(10));
     sim.pending.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
     sim.copy_send_on_wait = true;
-    sim.scripted_send_results = {-1}; /* negative → error */
+    sim.scripted_send_results = {-1}; // negative → error
 
     std::atomic<bool> running{true};
     sim.running = &running;
@@ -788,7 +788,7 @@ TEST(DSTIntegration, SendResultOverrunClosesConnection) {
     sim.pending.push_back(sim_accept(10));
     sim.pending.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
     sim.copy_send_on_wait = true;
-    sim.scripted_send_results = {9999}; /* > response len → overrun */
+    sim.scripted_send_results = {9999}; // > response len → overrun
 
     std::atomic<bool> running{true};
     sim.running = &running;
@@ -811,17 +811,17 @@ TEST(DSTIntegration, SendResultOverrunClosesConnection) {
 }
 
 TEST(DSTIntegration, MultipleChunkedSends) {
-    /* Large response split across 3 partial sends. */
+    // Large response split across 3 partial sends.
     SimIoBackend sim_setup;
     std::string pings;
     for (int i = 0; i < 5; i++) pings += "*1\r\n$4\r\nPING\r\n";
-    /* 5 x "+PONG\r\n" = 35 bytes total response */
+    // 5 x "+PONG\r\n" = 35 bytes total response
 
     SimIoBackend sim;
     sim.pending.push_back(sim_accept(10));
     sim.pending.push_back(sim_recv(&sim_setup, 10, pings.data(), static_cast<uint32_t>(pings.size())));
     sim.copy_send_on_wait = true;
-    sim.scripted_send_results = {10, 15, 10}; /* 10 + 15 + 10 = 35 bytes */
+    sim.scripted_send_results = {10, 15, 10}; // 10 + 15 + 10 = 35 bytes
 
     std::atomic<bool> running{true};
     sim.running = &running;
@@ -848,13 +848,13 @@ TEST(DSTIntegration, BufferRecycling) {
 
     std::vector<IoCompletion> events;
     events.push_back(sim_accept(10));
-    /* Two recv events with distinct buf_ids. */
+    // Two recv events with distinct buf_ids.
     events.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
     events.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
 
     SimIoBackend result = run_worker_sim(events);
 
-    /* Both buf_ids should have been recycled. */
+    // Both buf_ids should have been recycled.
     EXPECT_GE(result.recycled_buf_ids.size(), 2u);
 }
 
@@ -866,7 +866,7 @@ TEST(DSTIntegration, CloseRetryOnlyOnENOSPC) {
     sim.pending.push_back(sim_accept(10));
     sim.pending.push_back(sim_recv(&sim_setup, 10, bad.data(), static_cast<uint32_t>(bad.size())));
     sim.submit_close_fail_count = 4;
-    sim.submit_close_fail_errno = -EINVAL; /* permanent close-submit failure */
+    sim.submit_close_fail_errno = -EINVAL; // permanent close-submit failure
 
     std::atomic<bool> running{true};
     sim.running = &running;

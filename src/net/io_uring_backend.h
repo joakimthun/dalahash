@@ -1,4 +1,4 @@
-/* io_uring_backend.h — Production I/O backend using Linux io_uring. */
+// io_uring_backend.h — Production I/O backend using Linux io_uring.
 
 #pragma once
 

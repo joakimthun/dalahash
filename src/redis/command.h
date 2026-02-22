@@ -1,8 +1,8 @@
-/* command.h — Dispatches a parsed RESP command and writes the RESP response.
- *
- * command_execute writes a complete RESP response into out_buf[] and returns
- * the number of bytes written. Returns 0 only if no response should be sent
- * (currently never happens — every command gets a response). */
+//  command.h — Dispatches a parsed RESP command and writes the RESP response.
+//
+// command_execute writes a complete RESP response into out_buf[] and returns
+// the number of bytes written. Returns 0 only if no response should be sent
+// (currently never happens — every command gets a response).
 
 #pragma once
 

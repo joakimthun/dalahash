@@ -1,4 +1,4 @@
-/* main.cpp — Entry point. Usage: dalahash [--port PORT] [--workers N] */
+// main.cpp — Entry point. Usage: dalahash [--port PORT] [--workers N]
 
 #include "net/server.h"
 

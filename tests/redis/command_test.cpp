@@ -1,4 +1,4 @@
-/* command_test.cpp — Command dispatch tests. */
+// command_test.cpp — Command dispatch tests.
 
 #include "command.h"
 #include "resp.h"
@@ -81,7 +81,7 @@ TEST(Command, MixedCase) {
     EXPECT_EQ(exec(make_cmd({"gEt", "k"}), &store), "$1\r\nv\r\n");
 }
 
-/* --- Additional command edge cases --- */
+// --- Additional command edge cases ---
 
 TEST(Command, EmptyCommand) {
     Store store;
@@ -94,7 +94,7 @@ TEST(Command, EmptyCommand) {
 
 TEST(Command, EmptyKey) {
     Store store;
-    /* SET with empty key, then GET with empty key. */
+    // SET with empty key, then GET with empty key.
     EXPECT_EQ(exec(make_cmd({"SET", "", "val"}), &store), "+OK\r\n");
     EXPECT_EQ(exec(make_cmd({"GET", ""}), &store), "$3\r\nval\r\n");
 }
@@ -120,16 +120,16 @@ TEST(Command, LargeValue) {
     cmd.argc = 3;
     EXPECT_EQ(exec(cmd, &store), "+OK\r\n");
 
-    /* GET it back. */
+    // GET it back.
     std::string get_result = exec(make_cmd({"GET", "bigkey"}), &store);
     EXPECT_TRUE(get_result.starts_with("$4000\r\n"));
     EXPECT_TRUE(get_result.ends_with("\r\n"));
-    EXPECT_EQ(get_result.size(), 7u + 4000u + 2u); /* "$4000\r\n" + data + "\r\n" */
+    EXPECT_EQ(get_result.size(), 7u + 4000u + 2u); // "$4000\r\n" + data + "\r\n"
 }
 
 TEST(Command, BinaryKeyValue) {
     Store store;
-    /* Key and value containing null bytes. */
+    // Key and value containing null bytes.
     uint8_t key_data[] = {'k', 0x00, 'y'};
     uint8_t val_data[] = {'v', 0x00, '\n', 'l'};
 
@@ -147,7 +147,7 @@ TEST(Command, BinaryKeyValue) {
     uint32_t n = command_execute(&set_cmd, &store, buf, sizeof(buf));
     EXPECT_EQ(std::string(reinterpret_cast<char *>(buf), n), "+OK\r\n");
 
-    /* GET with same binary key. */
+    // GET with same binary key.
     RespCommand get_cmd = {};
     const char *get_str = "GET";
     get_cmd.args[0].data = reinterpret_cast<const uint8_t *>(get_str);
@@ -188,13 +188,13 @@ TEST(Command, SetTooManyArgs) {
 }
 
 TEST(Command, PingExtraArgs) {
-    /* PING currently ignores argc — verify it still returns PONG. */
+    // PING currently ignores argc — verify it still returns PONG.
     Store store;
     EXPECT_EQ(exec(make_cmd({"PING", "hello"}), &store), "+PONG\r\n");
 }
 
 TEST(Command, CommandWithArgs) {
-    /* COMMAND DOCS with extra args → still returns *0\r\n. */
+    // COMMAND DOCS with extra args → still returns *0\r\n.
     Store store;
     EXPECT_EQ(exec(make_cmd({"COMMAND", "DOCS", "GET"}), &store), "*0\r\n");
 }
@@ -207,15 +207,15 @@ static std::string exec_sized(const RespCommand &cmd, Store *store, uint32_t buf
 
 TEST(Command, OutputBufferTooSmall) {
     Store store;
-    /* buf_size=3 is less than the 5 bytes needed for "+OK\r\n". */
+    // buf_size=3 is less than the 5 bytes needed for "+OK\r\n".
     std::string result = exec_sized(make_cmd({"SET", "k", "v"}), &store, 3);
-    /* Should get a truncated error (write_error_bounded with size 3). */
+    // Should get a truncated error (write_error_bounded with size 3).
     EXPECT_LE(result.size(), 3u);
 }
 
 TEST(Command, OutputBufferExactFitSet) {
     Store store;
-    /* "+OK\r\n" is 5 bytes; buffer of exactly 5 should work. */
+    // "+OK\r\n" is 5 bytes; buffer of exactly 5 should work.
     std::string result = exec_sized(make_cmd({"SET", "k", "v"}), &store, 5);
     EXPECT_EQ(result, "+OK\r\n");
 }

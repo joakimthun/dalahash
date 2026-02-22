@@ -1,4 +1,4 @@
-/* connection.h — Per-connection state for TCP clients. */
+// connection.h — Per-connection state for TCP clients.
 
 #pragma once
 
@@ -6,23 +6,23 @@
 #include <cstdlib>
 #include <cstring>
 
-static constexpr uint32_t CONN_BUF_SIZE = 16384;   /* reassembly buffer for partial RESP */
-static constexpr int MAX_CONNECTIONS = 65536;       /* flat fd-indexed table size */
+static constexpr uint32_t CONN_BUF_SIZE = 16384;   // reassembly buffer for partial RESP
+static constexpr int MAX_CONNECTIONS = 65536;       // flat fd-indexed table size
 
 struct TxChunk;
 
 struct Connection {
     int fd;
-    uint8_t read_buf[CONN_BUF_SIZE]; /* partial RESP reassembly buffer */
-    uint32_t read_len;              /* valid bytes in read_buf */
-    bool closing;                   /* stop accepting new app work on this conn */
-    bool close_submitted;           /* close SQE already submitted to kernel */
-    bool close_in_retry_queue;      /* queued for retry after -ENOSPC close */
-    bool send_inflight;             /* exactly one async send in progress */
-    TxChunk *tx_head;               /* head of FIFO response queue */
-    TxChunk *tx_tail;               /* tail of FIFO response queue */
-    uint32_t tx_head_sent;          /* bytes already sent from tx_head */
-    uint32_t tx_bytes_queued;       /* total queued bytes (backpressure meter) */
+    uint8_t read_buf[CONN_BUF_SIZE]; // partial RESP reassembly buffer
+    uint32_t read_len;              // valid bytes in read_buf
+    bool closing;                   // stop accepting new app work on this conn
+    bool close_submitted;           // close SQE already submitted to kernel
+    bool close_in_retry_queue;      // queued for retry after -ENOSPC close
+    bool send_inflight;             // exactly one async send in progress
+    TxChunk *tx_head;               // head of FIFO response queue
+    TxChunk *tx_tail;               // tail of FIFO response queue
+    uint32_t tx_head_sent;          // bytes already sent from tx_head
+    uint32_t tx_bytes_queued;       // total queued bytes (backpressure meter)
 };
 
 inline Connection *connection_create(int fd) {

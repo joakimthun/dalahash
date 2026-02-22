@@ -1,9 +1,7 @@
-/*
- * sim_io_backend.h — Simulated I/O backend for DST.
- *
- * In-process replacement for io_uring. Tests push scripted IoCompletion
- * events; wait() pops them; submit_send() captures outgoing data.
- */
+// sim_io_backend.h — Simulated I/O backend for DST.
+//
+// In-process replacement for io_uring. Tests push scripted IoCompletion
+// events; wait() pops them; submit_send() captures outgoing data.
 
 #pragma once
 
@@ -26,25 +24,25 @@ struct SimIoBackend {
 
     std::vector<IoCompletion> pending;
     size_t pending_index = 0;
-    std::unordered_map<int, std::string> sent_data; /* captured per-fd responses */
+    std::unordered_map<int, std::string> sent_data; // captured per-fd responses
     std::vector<int> recv_armed;
     std::vector<int> closed_fds;
     bool accept_armed = false;
-    std::vector<std::vector<uint8_t>> buffers;      /* holds recv data allocations */
+    std::vector<std::vector<uint8_t>> buffers;      // holds recv data allocations
     bool inject_eintr = false;
     bool auto_stop = true;
     int send_call_count = 0;
     int submit_close_call_count = 0;
-    std::atomic<bool> *running = nullptr; /* set by integration tests for auto_stop */
-    bool copy_send_on_wait = false;       /* emulate async user-buffer reads */
+    std::atomic<bool> *running = nullptr; // set by integration tests for auto_stop
+    bool copy_send_on_wait = false;       // emulate async user-buffer reads
     std::vector<PendingSendRef> pending_send_refs;
     size_t pending_send_index = 0;
     std::vector<int> scripted_send_results;
     size_t scripted_send_result_index = 0;
     std::vector<uint16_t> recycled_buf_ids;
 
-    /* Failure injection: when > 0, the corresponding submit returns -ENOSPC
-     * and the counter is decremented. */
+        //  Failure injection: when > 0, the corresponding submit returns -ENOSPC
+    // and the counter is decremented.
     int submit_accept_fail_count = 0;
     int submit_recv_fail_count = 0;
     int submit_send_fail_count = 0;
@@ -136,14 +134,14 @@ static int sim_wait(IoBackend *ctx, IoCompletion *out, int max_completions) {
         }
         out[count++] = comp;
     }
-    /* When all scripted events are drained and auto_stop is set, signal the
-     * worker to exit its event loop. */
+        //  When all scripted events are drained and auto_stop is set, signal the
+    // worker to exit its event loop.
     if (count == 0 && be->auto_stop && be->running)
         be->running->store(false, std::memory_order_relaxed);
     return count;
 }
 
-static void sim_destroy(IoBackend *) {} /* test owns the SimIoBackend */
+static void sim_destroy(IoBackend *) {} // test owns the SimIoBackend
 
 static inline IoOps sim_io_ops() {
     return IoOps{
@@ -157,7 +155,7 @@ static inline IoOps sim_io_ops() {
 }
 
 static inline IoCompletion sim_accept(int new_fd) {
-    /* more=true: multishot stays armed — worker won't try to resubmit. */
+    // more=true: multishot stays armed — worker won't try to resubmit.
     return {.kind = IoCompletion::ACCEPT, .fd = new_fd, .result = new_fd,
             .buf = nullptr, .buf_len = 0, .buf_id = 0, .more = true};
 }
@@ -165,7 +163,7 @@ static inline IoCompletion sim_accept(int new_fd) {
 static inline IoCompletion sim_recv(SimIoBackend *be, int fd, const void *data, uint32_t len) {
     be->buffers.emplace_back(reinterpret_cast<const uint8_t *>(data), reinterpret_cast<const uint8_t *>(data) + len);
     uint16_t buf_id = static_cast<uint16_t>(be->buffers.size() - 1);
-    /* more=true: multishot stays armed — worker won't try to resubmit. */
+    // more=true: multishot stays armed — worker won't try to resubmit.
     return {.kind = IoCompletion::RECV, .fd = fd, .result = static_cast<int>(len),
             .buf = be->buffers.back().data(), .buf_len = len, .buf_id = buf_id,
             .more = true};

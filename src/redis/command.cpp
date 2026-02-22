@@ -1,12 +1,12 @@
-/* command.cpp — Command dispatch: verb lookup, store access, response encoding. */
+// command.cpp — Command dispatch: verb lookup, store access, response encoding.
 
 #include "command.h"
 #include <cstdio>
 #include <cstring>
 #include <limits>
 
-/* Case-insensitive argument match via clearing bit 5 (0x20): 'a'→'A', 'g'→'G'.
- * Works for ASCII letters only, which covers all Redis command verbs. */
+//  Case-insensitive argument match via clearing bit 5 (0x20): 'a'→'A', 'g'→'G'.
+// Works for ASCII letters only, which covers all Redis command verbs.
 static bool arg_matches(const RespArg *arg, const char *expected, uint32_t expected_len) {
     if (arg->len != expected_len) return false;
     for (uint32_t i = 0; i < expected_len; i++) {
@@ -29,10 +29,10 @@ static uint32_t write_error_bounded(uint8_t *out, uint32_t out_buf_size, const c
     return static_cast<uint32_t>(n);
 }
 
-/* Execute one parsed RESP command and write its RESP response into out_buf[].
- * Returns the number of bytes written. cmd->args[i].data points into the
- * receive buffer (zero-copy from the parser), so key/value byte ranges are
- * available without any additional allocation until this function returns. */
+//  Execute one parsed RESP command and write its RESP response into out_buf[].
+// Returns the number of bytes written. cmd->args[i].data points into the
+// receive buffer (zero-copy from the parser), so key/value byte ranges are
+// available without any additional allocation until this function returns.
 uint32_t command_execute(const RespCommand *cmd, Store *store,
                          uint8_t *out_buf, uint32_t out_buf_size) {
     if (cmd->argc < 1) return write_error_bounded(out_buf, out_buf_size, "empty command");
@@ -42,10 +42,10 @@ uint32_t command_execute(const RespCommand *cmd, Store *store,
     if (arg_matches(verb, "GET", 3)) {
         if (cmd->argc != 2)
             return write_error_bounded(out_buf, out_buf_size, "wrong number of arguments for 'get' command");
-        /* args[1] points into the receive buffer — construct string_view without copy. */
+        // args[1] points into the receive buffer — construct string_view without copy.
         std::string_view key(reinterpret_cast<const char *>(cmd->args[1].data), cmd->args[1].len);
-        /* store_get returns a pointer into the map; resp_write_bulk copies the
-         * value bytes into out_buf for the async send. */
+                //  store_get returns a pointer into the map; resp_write_bulk copies the
+        // value bytes into out_buf for the async send.
         const std::string *val = store_get(store, key);
         if (!val) {
             if (out_buf_size < 5) return write_error_bounded(out_buf, out_buf_size, "output buffer too small");
@@ -63,8 +63,8 @@ uint32_t command_execute(const RespCommand *cmd, Store *store,
     if (arg_matches(verb, "SET", 3)) {
         if (cmd->argc != 3)
             return write_error_bounded(out_buf, out_buf_size, "wrong number of arguments for 'set' command");
-        /* args[1] and args[2] point into the receive buffer. store_set copies
-         * both key and value into std::string heap allocations in the map. */
+                //  args[1] and args[2] point into the receive buffer. store_set copies
+        // both key and value into std::string heap allocations in the map.
         std::string_view key(reinterpret_cast<const char *>(cmd->args[1].data), cmd->args[1].len);
         std::string_view value(reinterpret_cast<const char *>(cmd->args[2].data), cmd->args[2].len);
         store_set(store, key, value);
@@ -77,7 +77,7 @@ uint32_t command_execute(const RespCommand *cmd, Store *store,
         return resp_write_pong(out_buf);
     }
 
-    /* Stub for redis-cli handshake — returns empty array. */
+    // Stub for redis-cli handshake — returns empty array.
     if (arg_matches(verb, "COMMAND", 7)) {
         if (out_buf_size < 4) return write_error_bounded(out_buf, out_buf_size, "output buffer too small");
         std::memcpy(out_buf, "*0\r\n", 4);
