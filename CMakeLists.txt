@@ -14,6 +14,19 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Global compiler flags: no exceptions, enable warnings
 add_compile_options(-fno-exceptions -Wall -Wextra)
 
+# AddressSanitizer (ASan) — enable with -DENABLE_ASAN=ON
+# Detects heap/stack buffer overflows, use-after-free, and memory leaks at runtime.
+# Applied globally because ASan requires all translation units in a binary to use the
+# same instrumentation flags — this also covers GoogleTest (pulled via FetchContent).
+option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
+if(ENABLE_ASAN)
+    # -fsanitize=address: instrument memory accesses with shadow memory checks
+    # -fno-omit-frame-pointer: preserve frame pointers for readable stack traces
+    add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
+    # Linker also needs -fsanitize=address to link the ASan runtime library
+    add_link_options(-fsanitize=address)
+endif()
+
 # Find liburing (io_uring wrapper library) — requires: sudo apt install liburing-dev
 # find_library: locates the shared/static library file (liburing.so / liburing.a)
 # find_path: locates the header directory containing liburing.h
