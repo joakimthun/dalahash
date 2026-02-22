@@ -1,4 +1,6 @@
 build/
+build-lsan/
+build-asan/
 *.md
 *.local.json
 notes.txt

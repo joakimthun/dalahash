@@ -14,17 +14,24 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # Global compiler flags: no exceptions, enable warnings
 add_compile_options(-fno-exceptions -Wall -Wextra)
 
-# AddressSanitizer (ASan) — enable with -DENABLE_ASAN=ON
-# Detects heap/stack buffer overflows, use-after-free, and memory leaks at runtime.
-# Applied globally because ASan requires all translation units in a binary to use the
-# same instrumentation flags — this also covers GoogleTest (pulled via FetchContent).
+# AddressSanitizer (ASan) and LeakSanitizer (LSan) build toggles.
+# Applied globally because sanitizer runtimes require consistent flags across
+# all objects linked into each binary (including GoogleTest via FetchContent).
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
+option(ENABLE_LSAN "Enable LeakSanitizer" OFF)
+
+set(DALAHASH_SANITIZERS "")
 if(ENABLE_ASAN)
-    # -fsanitize=address: instrument memory accesses with shadow memory checks
-    # -fno-omit-frame-pointer: preserve frame pointers for readable stack traces
-    add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
-    # Linker also needs -fsanitize=address to link the ASan runtime library
-    add_link_options(-fsanitize=address)
+    list(APPEND DALAHASH_SANITIZERS address)
+endif()
+if(ENABLE_LSAN)
+    list(APPEND DALAHASH_SANITIZERS leak)
+endif()
+
+if(DALAHASH_SANITIZERS)
+    list(JOIN DALAHASH_SANITIZERS "," DALAHASH_SANITIZER_FLAGS)
+    add_compile_options(-fsanitize=${DALAHASH_SANITIZER_FLAGS} -fno-omit-frame-pointer)
+    add_link_options(-fsanitize=${DALAHASH_SANITIZER_FLAGS})
 endif()
 
 # Find liburing (io_uring wrapper library) — requires: sudo apt install liburing-dev

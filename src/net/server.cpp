@@ -84,6 +84,8 @@ int server_start(const ServerConfig *config) {
         if (ret != 0) {
             std::fprintf(stderr, "dalahash: thread create failed for worker %d: %s\n",
                          i, std::strerror(ret));
+            configs[i].ops.destroy(configs[i].backend);
+            configs[i].backend = nullptr;
             g_running.store(false, std::memory_order_relaxed);
             break;
         }

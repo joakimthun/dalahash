@@ -726,24 +726,31 @@ static void handle_error(const IoCompletion *comp, Connection **conns,
 }
 
 int worker_run(WorkerConfig *config) {
-    int listen_fd;
+    int listen_fd = -1;
 
     if (config->skip_setup) {
         listen_fd = config->listen_fd;
     } else {
         int pin_ret = pin_to_core(config->cpu_id);
-        if (pin_ret < 0) return pin_ret;
+        if (pin_ret < 0) {
+            if (config->backend) config->ops.destroy(config->backend);
+            return pin_ret;
+        }
         std::fprintf(stderr, "worker %d: starting on core %d, port %d\n",
                      config->cpu_id, config->cpu_id, config->port);
         listen_fd = create_listen_socket(config->port);
-        if (listen_fd < 0) return -1;
+        if (listen_fd < 0) {
+            if (config->backend) config->ops.destroy(config->backend);
+            return -1;
+        }
     }
 
     int ret = config->ops.init(config->backend);
     if (ret < 0) {
         std::fprintf(stderr, "worker %d: backend init failed: %s\n",
                      config->cpu_id, std::strerror(-ret));
-        if (!config->skip_setup) close(listen_fd);
+        if (!config->skip_setup && listen_fd >= 0) close(listen_fd);
+        if (config->backend) config->ops.destroy(config->backend);
         return ret;
     }
 
@@ -832,8 +839,8 @@ int worker_run(WorkerConfig *config) {
         recycle_flush(&recycle, &config->ops, config->backend);
     }
 
-    if (!config->skip_setup) close(listen_fd);
-    config->ops.destroy(config->backend);
+    if (!config->skip_setup && listen_fd >= 0) close(listen_fd);
+    if (config->backend) config->ops.destroy(config->backend);
 
     for (int i = 0; i < MAX_CONNECTIONS; i++) {
         if (conns[i]) {
