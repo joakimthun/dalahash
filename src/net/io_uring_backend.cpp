@@ -361,6 +361,30 @@ static void uring_recycle_buffer(IoBackend *ctx, uint16_t buf_id) {
     io_uring_buf_ring_advance(be->buf_ring, 1);
 }
 
+/* Batched buffer recycle: one tail advance for all returned buffers.
+ *
+ * The provided-buf ring is append-only from userspace perspective: each call
+ * to io_uring_buf_ring_add writes entries at (tail + offset). We therefore use
+ * offset=added (0..N-1) for this batch and then advance tail once by N.
+ * This reduces atomic tail updates compared to per-buffer recycle. */
+static void uring_recycle_buffers(IoBackend *ctx, const uint16_t *buf_ids, uint32_t count) {
+    auto *be = reinterpret_cast<UringBackend *>(ctx);
+    if (!buf_ids || count == 0) return;
+
+    int mask = io_uring_buf_ring_mask(be->buf_count);
+    uint32_t added = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        uint16_t buf_id = buf_ids[i];
+        if (static_cast<uint32_t>(buf_id) >= be->buf_count) continue;
+        io_uring_buf_ring_add(be->buf_ring,
+                              be->buf_pool + (static_cast<uint32_t>(buf_id) * be->buf_size),
+                              be->buf_size, buf_id, mask, static_cast<int>(added));
+        added++;
+    }
+    if (added > 0)
+        io_uring_buf_ring_advance(be->buf_ring, static_cast<int>(added));
+}
+
 static int uring_wait(IoBackend *ctx, IoCompletion *out, int max_completions) {
     auto *be = reinterpret_cast<UringBackend *>(ctx);
 
@@ -414,9 +438,15 @@ static int uring_wait(IoBackend *ctx, IoCompletion *out, int max_completions) {
             continue;
         }
 
-        /* Output array full — keep iterating to consume IGNORE CQEs, but leave
-         * data CQEs in the ring (don't increment total_seen) for next wait. */
-        if (out_count >= max_completions) continue;
+        /* Output array full: stop here so cq_advance only consumes a contiguous
+         * prefix. This guarantees we never skip a data CQE and then advance
+         * past it because of later IGNORE completions.
+         *
+         * Example bug avoided:
+         *   [DATA][DATA][IGNORE]
+         *   if max_completions reached before 2nd DATA and we still consumed
+         *   IGNORE, total_seen would advance past skipped DATA -> drop CQE. */
+        if (out_count >= max_completions) break;
 
         IoCompletion *c = &out[out_count];
         c->kind = kind;
@@ -461,9 +491,22 @@ static int uring_wait(IoBackend *ctx, IoCompletion *out, int max_completions) {
                  * We use this ID to compute the buffer pointer in our pool and
                  * to recycle the buffer after processing. */
                 uint16_t bid = cqe->flags >> IORING_CQE_BUFFER_SHIFT;
-                c->buf = be->buf_pool + (static_cast<uint32_t>(bid) * be->buf_size);
-                c->buf_len = static_cast<uint32_t>(cqe->res);
-                c->buf_id = bid;
+                if (static_cast<uint32_t>(bid) >= be->buf_count) {
+                    c->kind = IoCompletion::ERROR;
+                    c->result = -EOVERFLOW;
+                    c->more = false;
+                } else {
+                    c->buf = be->buf_pool + (static_cast<uint32_t>(bid) * be->buf_size);
+                    c->buf_len = static_cast<uint32_t>(cqe->res);
+                    c->buf_id = bid;
+                }
+            } else {
+                /* With IOSQE_BUFFER_SELECT we must always receive a selected
+                 * provided buffer when cqe->res > 0. Missing F_BUFFER indicates
+                 * inconsistent completion metadata, treat as fatal for op. */
+                c->kind = IoCompletion::ERROR;
+                c->result = -EIO;
+                c->more = false;
             }
         }
 
@@ -513,6 +556,7 @@ IoOps io_uring_ops() {
         .submit_close = uring_submit_close,
         .submit_nodelay = uring_submit_nodelay,
         .recycle_buffer = uring_recycle_buffer,
+        .recycle_buffers = uring_recycle_buffers,
         .wait = uring_wait,
         .destroy = uring_destroy,
     };

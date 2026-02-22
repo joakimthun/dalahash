@@ -39,6 +39,9 @@ struct IoOps {
      * rather than coalesced. Async to keep the accept path off the hot path. */
     int (*submit_nodelay)(IoBackend *ctx, int fd);
     void (*recycle_buffer)(IoBackend *ctx, uint16_t buf_id);
+    /* Optional batched buffer recycle for provided-buf rings. Backends that
+     * don't implement this may leave it null; worker falls back to per-buffer. */
+    void (*recycle_buffers)(IoBackend *ctx, const uint16_t *buf_ids, uint32_t count);
     int (*wait)(IoBackend *ctx, IoCompletion *out, int max_completions);
     void (*destroy)(IoBackend *ctx);
 };

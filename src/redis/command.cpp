@@ -1,7 +1,9 @@
 /* command.cpp — Command dispatch: verb lookup, store access, response encoding. */
 
 #include "command.h"
+#include <cstdio>
 #include <cstring>
+#include <limits>
 
 /* Case-insensitive argument match via clearing bit 5 (0x20): 'a'→'A', 'g'→'G'.
  * Works for ASCII letters only, which covers all Redis command verbs. */
@@ -13,45 +15,74 @@ static bool arg_matches(const RespArg *arg, const char *expected, uint32_t expec
     return true;
 }
 
+static uint32_t decimal_len_u32(uint32_t v) {
+    uint32_t digits = 1;
+    while (v >= 10) { v /= 10; digits++; }
+    return digits;
+}
+
+static uint32_t write_error_bounded(uint8_t *out, uint32_t out_buf_size, const char *msg) {
+    if (out_buf_size == 0) return 0;
+    int n = std::snprintf(reinterpret_cast<char *>(out), out_buf_size, "-ERR %s\r\n", msg);
+    if (n <= 0) return 0;
+    if (static_cast<uint32_t>(n) >= out_buf_size) return out_buf_size - 1;
+    return static_cast<uint32_t>(n);
+}
+
 /* Execute one parsed RESP command and write its RESP response into out_buf[].
  * Returns the number of bytes written. cmd->args[i].data points into the
  * receive buffer (zero-copy from the parser), so key/value byte ranges are
  * available without any additional allocation until this function returns. */
 uint32_t command_execute(const RespCommand *cmd, Store *store,
                          uint8_t *out_buf, uint32_t out_buf_size) {
-    (void)out_buf_size; /* used by caller for capacity tracking; per-command bounds TBD */
-    if (cmd->argc < 1) return resp_write_error(out_buf, "empty command");
+    if (cmd->argc < 1) return write_error_bounded(out_buf, out_buf_size, "empty command");
 
     const RespArg *verb = &cmd->args[0];
 
     if (arg_matches(verb, "GET", 3)) {
-        if (cmd->argc != 2) return resp_write_error(out_buf, "wrong number of arguments for 'get' command");
+        if (cmd->argc != 2)
+            return write_error_bounded(out_buf, out_buf_size, "wrong number of arguments for 'get' command");
         /* args[1] points into the receive buffer — construct string_view without copy. */
         std::string_view key(reinterpret_cast<const char *>(cmd->args[1].data), cmd->args[1].len);
         /* store_get returns a pointer into the map; resp_write_bulk copies the
          * value bytes into out_buf for the async send. */
         const std::string *val = store_get(store, key);
-        if (!val) return resp_write_null(out_buf);
+        if (!val) {
+            if (out_buf_size < 5) return write_error_bounded(out_buf, out_buf_size, "output buffer too small");
+            return resp_write_null(out_buf);
+        }
+        if (val->size() > std::numeric_limits<uint32_t>::max())
+            return write_error_bounded(out_buf, out_buf_size, "response too large");
+        uint32_t val_len = static_cast<uint32_t>(val->size());
+        uint64_t needed = 1ull + decimal_len_u32(val_len) + 2ull + val_len + 2ull;
+        if (needed > out_buf_size)
+            return write_error_bounded(out_buf, out_buf_size, "response too large");
         return resp_write_bulk(out_buf, reinterpret_cast<const uint8_t *>(val->data()), static_cast<uint32_t>(val->size()));
     }
 
     if (arg_matches(verb, "SET", 3)) {
-        if (cmd->argc != 3) return resp_write_error(out_buf, "wrong number of arguments for 'set' command");
+        if (cmd->argc != 3)
+            return write_error_bounded(out_buf, out_buf_size, "wrong number of arguments for 'set' command");
         /* args[1] and args[2] point into the receive buffer. store_set copies
          * both key and value into std::string heap allocations in the map. */
         std::string_view key(reinterpret_cast<const char *>(cmd->args[1].data), cmd->args[1].len);
         std::string_view value(reinterpret_cast<const char *>(cmd->args[2].data), cmd->args[2].len);
         store_set(store, key, value);
+        if (out_buf_size < 5) return write_error_bounded(out_buf, out_buf_size, "output buffer too small");
         return resp_write_ok(out_buf);
     }
 
-    if (arg_matches(verb, "PING", 4)) return resp_write_pong(out_buf);
+    if (arg_matches(verb, "PING", 4)) {
+        if (out_buf_size < 7) return write_error_bounded(out_buf, out_buf_size, "output buffer too small");
+        return resp_write_pong(out_buf);
+    }
 
     /* Stub for redis-cli handshake — returns empty array. */
     if (arg_matches(verb, "COMMAND", 7)) {
+        if (out_buf_size < 4) return write_error_bounded(out_buf, out_buf_size, "output buffer too small");
         std::memcpy(out_buf, "*0\r\n", 4);
         return 4;
     }
 
-    return resp_write_error(out_buf, "unknown command");
+    return write_error_bounded(out_buf, out_buf_size, "unknown command");
 }

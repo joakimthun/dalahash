@@ -395,3 +395,120 @@ TEST(DSTIntegration, PartialReassemblyViaWorkerRun) {
     SimIoBackend result = run_worker_sim(events);
     EXPECT_EQ(result.sent_data[10], "+OK\r\n");
 }
+
+TEST(DSTIntegration, AcceptInitialArmFailureRetries) {
+    SimIoBackend sim;
+    sim.submit_accept_fail_count = 1; /* initial arm fails */
+    std::atomic<bool> running{true};
+    sim.running = &running;
+
+    WorkerConfig config = {};
+    config.cpu_id = 0;
+    config.ops = sim_io_ops();
+    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.running = &running;
+    config.skip_setup = true;
+    config.listen_fd = 0;
+
+    worker_run(&config);
+    EXPECT_TRUE(sim.accept_armed);
+}
+
+TEST(DSTIntegration, SendBuffersOwnedAcrossAsyncCompletion) {
+    SimIoBackend sim_setup;
+    std::string set_cmd = "*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n";
+    std::string get_cmd = "*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n";
+
+    SimIoBackend sim;
+    sim.pending.push_back(sim_accept(10));
+    sim.pending.push_back(sim_recv(&sim_setup, 10, set_cmd.data(), static_cast<uint32_t>(set_cmd.size())));
+    sim.pending.push_back(sim_recv(&sim_setup, 10, get_cmd.data(), static_cast<uint32_t>(get_cmd.size())));
+    sim.copy_send_on_wait = true; /* read user buffers when SEND CQEs are delivered */
+
+    std::atomic<bool> running{true};
+    sim.running = &running;
+
+    WorkerConfig config = {};
+    config.cpu_id = 0;
+    config.ops = sim_io_ops();
+    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.running = &running;
+    config.skip_setup = true;
+    config.listen_fd = 0;
+
+    worker_run(&config);
+    EXPECT_EQ(sim.sent_data[10], "+OK\r\n$3\r\nbar\r\n");
+}
+
+TEST(DSTIntegration, PartialSendResubmitsRemainingBytes) {
+    SimIoBackend sim_setup;
+    std::string ping = "*1\r\n$4\r\nPING\r\n";
+
+    SimIoBackend sim;
+    sim.pending.push_back(sim_accept(10));
+    sim.pending.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
+    sim.copy_send_on_wait = true;
+    sim.scripted_send_results = {3, 4}; /* +PONG\\r\\n -> 3 bytes then 4 bytes */
+
+    std::atomic<bool> running{true};
+    sim.running = &running;
+
+    WorkerConfig config = {};
+    config.cpu_id = 0;
+    config.ops = sim_io_ops();
+    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.running = &running;
+    config.skip_setup = true;
+    config.listen_fd = 0;
+
+    worker_run(&config);
+    EXPECT_EQ(sim.sent_data[10], "+PONG\r\n");
+    EXPECT_EQ(sim.send_call_count, 2);
+}
+
+TEST(DSTIntegration, ReassemblyOverflowClosesConnection) {
+    SimIoBackend sim_setup;
+    std::string prefix = "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$20000\r\n";
+    std::string first = prefix;
+    if (first.size() < CONN_BUF_SIZE - 1)
+        first.append(CONN_BUF_SIZE - 1 - first.size(), 'a');
+    std::string second(32, 'b');
+
+    std::vector<IoCompletion> events;
+    events.push_back(sim_accept(10));
+    events.push_back(sim_recv(&sim_setup, 10, first.data(), static_cast<uint32_t>(first.size())));
+    events.push_back(sim_recv(&sim_setup, 10, second.data(), static_cast<uint32_t>(second.size())));
+
+    SimIoBackend result = run_worker_sim(events);
+
+    bool was_closed = false;
+    for (int fd : result.closed_fds) {
+        if (fd == 10) { was_closed = true; break; }
+    }
+    EXPECT_TRUE(was_closed);
+}
+
+TEST(DSTIntegration, CloseRetryOnlyOnENOSPC) {
+    SimIoBackend sim_setup;
+    std::string bad = "GARBAGE\r\n";
+
+    SimIoBackend sim;
+    sim.pending.push_back(sim_accept(10));
+    sim.pending.push_back(sim_recv(&sim_setup, 10, bad.data(), static_cast<uint32_t>(bad.size())));
+    sim.submit_close_fail_count = 4;
+    sim.submit_close_fail_errno = -EINVAL; /* permanent close-submit failure */
+
+    std::atomic<bool> running{true};
+    sim.running = &running;
+
+    WorkerConfig config = {};
+    config.cpu_id = 0;
+    config.ops = sim_io_ops();
+    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.running = &running;
+    config.skip_setup = true;
+    config.listen_fd = 0;
+
+    worker_run(&config);
+    EXPECT_EQ(sim.submit_close_call_count, 1);
+}
