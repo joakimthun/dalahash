@@ -13,7 +13,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Protocol selection. v1 defaults to Redis.
 set(DALAHASH_PROTOCOL "redis" CACHE STRING "Application protocol")
-set_property(CACHE DALAHASH_PROTOCOL PROPERTY STRINGS redis)
+set_property(CACHE DALAHASH_PROTOCOL PROPERTY STRINGS redis echo)
 
 # Global compiler flags: no exceptions, enable warnings
 add_compile_options(-fno-exceptions -Wall -Wextra)
@@ -59,6 +59,8 @@ target_link_libraries(dalahash_lib PUBLIC ${URING_LIB} pthread)
 
 if(DALAHASH_PROTOCOL STREQUAL "redis")
     target_compile_definitions(dalahash_lib PUBLIC DALAHASH_PROTOCOL_REDIS=1)
+elseif(DALAHASH_PROTOCOL STREQUAL "echo")
+    target_compile_definitions(dalahash_lib PUBLIC DALAHASH_PROTOCOL_ECHO=1)
 else()
     message(FATAL_ERROR "Unsupported DALAHASH_PROTOCOL: ${DALAHASH_PROTOCOL}")
 endif()

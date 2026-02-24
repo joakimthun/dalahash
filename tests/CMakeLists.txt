@@ -20,28 +20,59 @@ add_executable(dalahash_tests
 target_link_libraries(dalahash_tests dalahash_lib GTest::gtest_main)
 target_include_directories(dalahash_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/redis)
 
-# DST tests — deterministic simulation using sim_io_backend.h
-add_executable(dst_tests
-    net/dst_test.cpp
-)
-# sim_io_backend.h lives in tests/net/; also needs src/net headers
-target_include_directories(dst_tests PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/net
-    ${CMAKE_SOURCE_DIR}/src/net
-)
-target_link_libraries(dst_tests dalahash_lib GTest::gtest_main)
+if(DALAHASH_PROTOCOL STREQUAL "redis")
+    # DST tests — deterministic simulation using sim_io_backend.h
+    add_executable(dst_tests
+        net/dst_test.cpp
+    )
+    # sim_io_backend.h lives in tests/net/; also needs src/net headers
+    target_include_directories(dst_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/net
+        ${CMAKE_SOURCE_DIR}/src/net
+    )
+    target_link_libraries(dst_tests dalahash_lib GTest::gtest_main)
 
-# Real I/O integration tests — starts dalahash and talks over TCP via redis-cli
-add_executable(io_uring_integration_tests
-    net/io_uring_integration_test.cpp
-)
-target_link_libraries(io_uring_integration_tests GTest::gtest_main)
-target_compile_definitions(io_uring_integration_tests PRIVATE
-    DALAHASH_BINARY_PATH="$<TARGET_FILE:dalahash>"
-)
+    # Real I/O integration tests — starts dalahash and talks over TCP via redis-cli
+    add_executable(io_uring_integration_tests
+        net/io_uring_integration_test.cpp
+    )
+    target_link_libraries(io_uring_integration_tests GTest::gtest_main)
+    target_compile_definitions(io_uring_integration_tests PRIVATE
+        DALAHASH_BINARY_PATH="$<TARGET_FILE:dalahash>"
+    )
+elseif(DALAHASH_PROTOCOL STREQUAL "echo")
+    # DST tests — deterministic simulation for echo protocol
+    add_executable(dst_echo_tests
+        net/dst_echo_test.cpp
+    )
+    target_include_directories(dst_echo_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/net
+        ${CMAKE_SOURCE_DIR}/src/net
+    )
+    target_link_libraries(dst_echo_tests dalahash_lib GTest::gtest_main)
+
+    # Real I/O integration tests — raw TCP echo behavior
+    add_executable(echo_integration_tests
+        net/echo_integration_test.cpp
+    )
+    target_link_libraries(echo_integration_tests GTest::gtest_main)
+    target_compile_definitions(echo_integration_tests PRIVATE
+        DALAHASH_BINARY_PATH="$<TARGET_FILE:dalahash>"
+    )
+endif()
 
 # GoogleTest integration — auto-discovers TEST() macros and registers them with CTest
 include(GoogleTest)
 gtest_discover_tests(dalahash_tests DISCOVERY_MODE PRE_TEST)
-gtest_discover_tests(dst_tests DISCOVERY_MODE PRE_TEST)
-gtest_discover_tests(io_uring_integration_tests DISCOVERY_MODE PRE_TEST)
+if(TARGET dst_tests)
+    gtest_discover_tests(dst_tests DISCOVERY_MODE PRE_TEST)
+endif()
+if(TARGET io_uring_integration_tests)
+    gtest_discover_tests(io_uring_integration_tests DISCOVERY_MODE PRE_TEST)
+endif()
+if(TARGET dst_echo_tests)
+    gtest_discover_tests(dst_echo_tests DISCOVERY_MODE PRE_TEST)
+endif()
+if(TARGET echo_integration_tests)
+    gtest_discover_tests(echo_integration_tests DISCOVERY_MODE PRE_TEST)
+endif()
