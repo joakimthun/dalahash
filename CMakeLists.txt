@@ -53,9 +53,9 @@ if(DALAHASH_SANITIZERS)
 endif()
 
 # Find liburing (io_uring wrapper library) — requires: sudo apt install liburing-dev
-# find_library: locates the shared/static library file (liburing.so / liburing.a)
+# Prefer the static archive so dalahash is as statically linked as possible.
 # find_path: locates the header directory containing liburing.h
-find_library(URING_LIB uring REQUIRED)
+find_library(URING_LIB NAMES liburing.a uring REQUIRED)
 find_path(URING_INCLUDE liburing.h REQUIRED)
 
 # Core library — all dalahash logic except main(). Linked by both the
@@ -82,6 +82,8 @@ endif()
 # Main executable — just the entry point, links all logic from dalahash_lib
 add_executable(dalahash src/main.cpp)
 target_link_libraries(dalahash dalahash_lib)
+# Statically link C++ runtime pieces where possible while keeping glibc dynamic.
+target_link_options(dalahash PRIVATE -static-libstdc++ -static-libgcc)
 
 # Enable CTest (cmake's test runner) and pull in the tests/ subdirectory
 enable_testing()
