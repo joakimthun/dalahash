@@ -18,6 +18,18 @@ set_property(CACHE DALAHASH_PROTOCOL PROPERTY STRINGS redis echo)
 # Global compiler flags: no exceptions, enable warnings
 add_compile_options(-fno-exceptions -Wall -Wextra)
 
+# Release performance configuration:
+# - CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE: enables LTO/IPO so the optimizer
+#   can inline and optimize hot paths across translation units.
+# - -march=native and -mtune=native: generate/schedule code for this host CPU.
+# These are Release-only by design; Debug/sanitizer builds keep normal toolchain behavior.
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+add_compile_options($<$<CONFIG:Release>:-march=native> $<$<CONFIG:Release>:-mtune=native>)
+add_link_options(
+    $<$<CONFIG:Release>:-march=native>
+    $<$<CONFIG:Release>:-mtune=native>
+)
+
 # AddressSanitizer (ASan) and LeakSanitizer (LSan) build toggles.
 # Applied globally because sanitizer runtimes require consistent flags across
 # all objects linked into each binary (including GoogleTest via FetchContent).
