@@ -1,19 +1,17 @@
 // dst_test.cpp — Deterministic simulation tests using SimIoBackend.
 
-#include "command.h"
 #include "connection.h"
-#include "resp.h"
+#include "protocol/protocol.h"
 #include "sim_io_backend.h"
-#include "store.h"
 #include "worker.h"
 
 #include <cstring>
 #include <gtest/gtest.h>
 #include <string>
 
-// Mirrors worker's handle_recv: parse RESP, execute, return response.
+// Mirrors worker's handle_recv: parse selected protocol, execute, return response.
 static std::string process_recv(Connection *conn, const uint8_t *data, uint32_t len,
-                                 Store *store) {
+                                ProtocolWorkerState *protocol_state) {
     std::string response;
     uint8_t response_buf[65536];
 
@@ -21,15 +19,15 @@ static std::string process_recv(Connection *conn, const uint8_t *data, uint32_t 
     uint32_t parse_len;
     uint8_t combined[16384 + 4096];
 
-    if (conn->read_len > 0) {
-        std::memcpy(combined, conn->read_buf, conn->read_len);
+    if (conn->input_len > 0) {
+        std::memcpy(combined, conn->input_buf, conn->input_len);
         uint32_t copy_len = len;
-        if (conn->read_len + copy_len > sizeof(combined))
-            copy_len = sizeof(combined) - conn->read_len;
-        std::memcpy(combined + conn->read_len, data, copy_len);
+        if (conn->input_len + copy_len > sizeof(combined))
+            copy_len = sizeof(combined) - conn->input_len;
+        std::memcpy(combined + conn->input_len, data, copy_len);
         parse_buf = combined;
-        parse_len = conn->read_len + copy_len;
-        conn->read_len = 0;
+        parse_len = conn->input_len + copy_len;
+        conn->input_len = 0;
     } else {
         parse_buf = data;
         parse_len = len;
@@ -37,17 +35,17 @@ static std::string process_recv(Connection *conn, const uint8_t *data, uint32_t 
 
     uint32_t offset = 0;
     while (offset < parse_len) {
-        RespCommand cmd;
+        ProtocolCommand cmd;
         uint32_t consumed = 0;
-        auto result = resp_parse(parse_buf + offset, parse_len - offset, &cmd, &consumed);
-        if (result == RespParseResult::OK) {
-            uint32_t n = command_execute(&cmd, store, response_buf, sizeof(response_buf));
+        auto result = protocol_parse(parse_buf + offset, parse_len - offset, &cmd, &consumed);
+        if (result == PROTOCOL_PARSE_OK) {
+            uint32_t n = protocol_execute(&cmd, protocol_state, response_buf, sizeof(response_buf));
             response.append(reinterpret_cast<char *>(response_buf), n);
             offset += consumed;
-        } else if (result == RespParseResult::INCOMPLETE) {
+        } else if (result == PROTOCOL_PARSE_INCOMPLETE) {
             uint32_t remaining = parse_len - offset;
-            std::memcpy(conn->read_buf, parse_buf + offset, remaining);
-            conn->read_len = remaining;
+            std::memcpy(conn->input_buf, parse_buf + offset, remaining);
+            conn->input_len = remaining;
             break;
         } else {
             conn->closing = true;
@@ -58,52 +56,57 @@ static std::string process_recv(Connection *conn, const uint8_t *data, uint32_t 
 }
 
 TEST(DST, SetThenGet) {
-    Store store;
+    ProtocolWorkerState state = {};
+    protocol_worker_init(&state);
     Connection *conn = connection_create(10);
     std::string set_data = "*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n";
-    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(set_data.data()), static_cast<uint32_t>(set_data.size()), &store), "+OK\r\n");
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(set_data.data()), static_cast<uint32_t>(set_data.size()), &state), "+OK\r\n");
     std::string get_data = "*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n";
-    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(get_data.data()), static_cast<uint32_t>(get_data.size()), &store), "$3\r\nbar\r\n");
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(get_data.data()), static_cast<uint32_t>(get_data.size()), &state), "$3\r\nbar\r\n");
     connection_destroy(conn);
 }
 
 TEST(DST, GetMiss) {
-    Store store;
+    ProtocolWorkerState state = {};
+    protocol_worker_init(&state);
     Connection *conn = connection_create(10);
     std::string data = "*2\r\n$3\r\nGET\r\n$7\r\nmissing\r\n";
-    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(data.data()), static_cast<uint32_t>(data.size()), &store), "$-1\r\n");
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(data.data()), static_cast<uint32_t>(data.size()), &state), "$-1\r\n");
     connection_destroy(conn);
 }
 
 TEST(DST, PipelinedCommands) {
-    Store store;
+    ProtocolWorkerState state = {};
+    protocol_worker_init(&state);
     Connection *conn = connection_create(10);
     std::string data = "*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n1\r\n"
                        "*2\r\n$3\r\nGET\r\n$1\r\na\r\n";
-    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(data.data()), static_cast<uint32_t>(data.size()), &store),
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(data.data()), static_cast<uint32_t>(data.size()), &state),
               "+OK\r\n$1\r\n1\r\n");
     connection_destroy(conn);
 }
 
 TEST(DST, PartialReassembly) {
-    Store store;
+    ProtocolWorkerState state = {};
+    protocol_worker_init(&state);
     Connection *conn = connection_create(10);
     std::string full = "*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n";
     size_t split = 15;
 
-    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(full.data()), static_cast<uint32_t>(split), &store), "");
-    EXPECT_GT(conn->read_len, 0u);
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(full.data()), static_cast<uint32_t>(split), &state), "");
+    EXPECT_GT(conn->input_len, 0u);
 
     EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(full.data()) + split,
-                           static_cast<uint32_t>(full.size() - split), &store), "+OK\r\n");
+                           static_cast<uint32_t>(full.size() - split), &state), "+OK\r\n");
     connection_destroy(conn);
 }
 
 TEST(DST, ProtocolError) {
-    Store store;
+    ProtocolWorkerState state = {};
+    protocol_worker_init(&state);
     Connection *conn = connection_create(10);
     std::string bad = "GARBAGE\r\n";
-    process_recv(conn, reinterpret_cast<const uint8_t *>(bad.data()), static_cast<uint32_t>(bad.size()), &store);
+    process_recv(conn, reinterpret_cast<const uint8_t *>(bad.data()), static_cast<uint32_t>(bad.size()), &state);
     EXPECT_TRUE(conn->closing);
     connection_destroy(conn);
 }
@@ -154,7 +157,8 @@ TEST(DST, DeepPipelineCoalesced) {
 
     // Drive completions through worker_run.
     Connection *conns[MAX_CONNECTIONS] = {};
-    Store store = {};
+    ProtocolWorkerState protocol_state = {};
+    protocol_worker_init(&protocol_state);
     IoCompletion completions[256];
 
     int n = ops.wait(ctx, completions, 256);
@@ -186,12 +190,12 @@ TEST(DST, DeepPipelineCoalesced) {
     uint32_t resp_offset = 0;
 
     while (offset < parse_len) {
-        RespCommand cmd;
+        ProtocolCommand cmd;
         uint32_t consumed = 0;
-        auto result = resp_parse(parse_buf + offset, parse_len - offset, &cmd, &consumed);
-        if (result == RespParseResult::OK) {
+        auto result = protocol_parse(parse_buf + offset, parse_len - offset, &cmd, &consumed);
+        if (result == PROTOCOL_PARSE_OK) {
             uint32_t cap = 65536 - resp_offset;
-            uint32_t resp_len = command_execute(&cmd, &store, response + resp_offset, cap);
+            uint32_t resp_len = protocol_execute(&cmd, &protocol_state, response + resp_offset, cap);
             resp_offset += resp_len;
             offset += consumed;
         } else {
@@ -213,15 +217,16 @@ TEST(DST, DeepPipelineCoalesced) {
 }
 
 TEST(DST, MultipleConnections) {
-    Store store;
+    ProtocolWorkerState state = {};
+    protocol_worker_init(&state);
     Connection *c1 = connection_create(10), *c2 = connection_create(11);
     std::string s1 = "*3\r\n$3\r\nSET\r\n$2\r\nk1\r\n$2\r\nv1\r\n";
     std::string s2 = "*3\r\n$3\r\nSET\r\n$2\r\nk2\r\n$2\r\nv2\r\n";
-    EXPECT_EQ(process_recv(c1, reinterpret_cast<const uint8_t *>(s1.data()), static_cast<uint32_t>(s1.size()), &store), "+OK\r\n");
-    EXPECT_EQ(process_recv(c2, reinterpret_cast<const uint8_t *>(s2.data()), static_cast<uint32_t>(s2.size()), &store), "+OK\r\n");
+    EXPECT_EQ(process_recv(c1, reinterpret_cast<const uint8_t *>(s1.data()), static_cast<uint32_t>(s1.size()), &state), "+OK\r\n");
+    EXPECT_EQ(process_recv(c2, reinterpret_cast<const uint8_t *>(s2.data()), static_cast<uint32_t>(s2.size()), &state), "+OK\r\n");
 
     std::string g1 = "*2\r\n$3\r\nGET\r\n$2\r\nk1\r\n";
-    EXPECT_EQ(process_recv(c2, reinterpret_cast<const uint8_t *>(g1.data()), static_cast<uint32_t>(g1.size()), &store), "$2\r\nv1\r\n");
+    EXPECT_EQ(process_recv(c2, reinterpret_cast<const uint8_t *>(g1.data()), static_cast<uint32_t>(g1.size()), &state), "$2\r\nv1\r\n");
     connection_destroy(c1);
     connection_destroy(c2);
 }
@@ -492,10 +497,11 @@ TEST(DSTIntegration, ReassemblyOverflowClosesConnection) {
 
 TEST(DST, EmptyRecv) {
     // recv with 0 bytes of data (buf non-null but len=0).
-    Store store;
+    ProtocolWorkerState state = {};
+    protocol_worker_init(&state);
     Connection *conn = connection_create(10);
     uint8_t dummy = 0;
-    std::string result = process_recv(conn, &dummy, 0, &store);
+    std::string result = process_recv(conn, &dummy, 0, &state);
     EXPECT_EQ(result, "");
     EXPECT_FALSE(conn->closing);
     connection_destroy(conn);
@@ -503,27 +509,29 @@ TEST(DST, EmptyRecv) {
 
 TEST(DST, MultiplePartialReassemblies) {
     // Split a command into 3 chunks across recvs.
-    Store store;
+    ProtocolWorkerState state = {};
+    protocol_worker_init(&state);
     Connection *conn = connection_create(10);
     std::string full = "*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n";
     size_t s1 = 5, s2 = 15;
 
     EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(full.data()),
-                           static_cast<uint32_t>(s1), &store), "");
-    EXPECT_GT(conn->read_len, 0u);
+                           static_cast<uint32_t>(s1), &state), "");
+    EXPECT_GT(conn->input_len, 0u);
 
     EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(full.data()) + s1,
-                           static_cast<uint32_t>(s2 - s1), &store), "");
-    EXPECT_GT(conn->read_len, 0u);
+                           static_cast<uint32_t>(s2 - s1), &state), "");
+    EXPECT_GT(conn->input_len, 0u);
 
     EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(full.data()) + s2,
-                           static_cast<uint32_t>(full.size() - s2), &store), "+OK\r\n");
+                           static_cast<uint32_t>(full.size() - s2), &state), "+OK\r\n");
     connection_destroy(conn);
 }
 
 TEST(DST, PipelinedMixedCommands) {
     // SET, GET, PING, and unknown command in one recv.
-    Store store;
+    ProtocolWorkerState state = {};
+    protocol_worker_init(&state);
     Connection *conn = connection_create(10);
     std::string data =
         "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n"
@@ -531,7 +539,7 @@ TEST(DST, PipelinedMixedCommands) {
         "*1\r\n$4\r\nPING\r\n"
         "*1\r\n$3\r\nFOO\r\n";
     std::string result = process_recv(conn, reinterpret_cast<const uint8_t *>(data.data()),
-                                      static_cast<uint32_t>(data.size()), &store);
+                                      static_cast<uint32_t>(data.size()), &state);
     EXPECT_EQ(result, "+OK\r\n$1\r\nv\r\n+PONG\r\n-ERR unknown command\r\n");
     connection_destroy(conn);
 }

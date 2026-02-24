@@ -1,4 +1,4 @@
-#include <gtest/gtest.h>
+// io_uring_integration_test.cpp — Real io_uring backend integration tests.
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -9,11 +9,12 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include <chrono>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <gtest/gtest.h>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -81,12 +82,15 @@ static bool command_exists(const char *name) {
     if (!path_env) return false;
 
     std::string path(path_env);
-    size_t start = 0;
+    std::size_t start = 0;
     while (start <= path.size()) {
-        size_t end = path.find(':', start);
-        std::string dir = (end == std::string::npos)
-                            ? path.substr(start)
-                            : path.substr(start, end - start);
+        std::size_t end = path.find(':', start);
+        std::string dir;
+        if (end == std::string::npos) {
+            dir = path.substr(start);
+        } else {
+            dir = path.substr(start, end - start);
+        }
         if (dir.empty()) dir = ".";
 
         std::string candidate = dir + "/" + name;
@@ -126,8 +130,9 @@ static uint16_t pick_unused_port() {
 }
 
 static std::string make_log_path(uint16_t port) {
-    return "/tmp/dalahash_io_uring_test_" + std::to_string(getpid()) + "_"
-         + std::to_string(port) + ".log";
+    return "/tmp/dalahash_io_uring_test_" +
+           std::to_string(getpid()) + "_" +
+           std::to_string(port) + ".log";
 }
 
 static std::string read_text_file(const std::string &path) {

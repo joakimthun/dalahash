@@ -11,6 +11,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Generate compile_commands.json for editor tooling (clangd, etc.)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Protocol selection. v1 defaults to Redis.
+set(DALAHASH_PROTOCOL "redis" CACHE STRING "Application protocol")
+set_property(CACHE DALAHASH_PROTOCOL PROPERTY STRINGS redis)
+
 # Global compiler flags: no exceptions, enable warnings
 add_compile_options(-fno-exceptions -Wall -Wextra)
 
@@ -52,6 +56,12 @@ add_library(dalahash_lib STATIC
 # PUBLIC: these include dirs and link libs propagate to anything linking dalahash_lib
 target_include_directories(dalahash_lib PUBLIC src ${URING_INCLUDE})
 target_link_libraries(dalahash_lib PUBLIC ${URING_LIB} pthread)
+
+if(DALAHASH_PROTOCOL STREQUAL "redis")
+    target_compile_definitions(dalahash_lib PUBLIC DALAHASH_PROTOCOL_REDIS=1)
+else()
+    message(FATAL_ERROR "Unsupported DALAHASH_PROTOCOL: ${DALAHASH_PROTOCOL}")
+endif()
 
 # Main executable — just the entry point, links all logic from dalahash_lib
 add_executable(dalahash src/main.cpp)

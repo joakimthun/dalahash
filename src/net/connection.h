@@ -6,15 +6,15 @@
 #include <cstdlib>
 #include <cstring>
 
-static constexpr uint32_t CONN_BUF_SIZE = 16384;   // reassembly buffer for partial RESP
+static constexpr uint32_t CONN_BUF_SIZE = 16384;   // stream reassembly buffer
 static constexpr int MAX_CONNECTIONS = 65536;       // flat fd-indexed table size
 
 struct TxChunk;
 
 struct Connection {
     int fd;
-    uint8_t read_buf[CONN_BUF_SIZE]; // partial RESP reassembly buffer
-    uint32_t read_len;              // valid bytes in read_buf
+    uint8_t input_buf[CONN_BUF_SIZE]; // staged stream bytes across recv boundaries
+    uint32_t input_len;               // valid bytes in input_buf
     bool closing;                   // stop accepting new app work on this conn
     bool close_submitted;           // close SQE already submitted to kernel
     bool close_in_retry_queue;      // queued for retry after -ENOSPC close

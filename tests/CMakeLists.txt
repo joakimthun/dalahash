@@ -24,10 +24,9 @@ target_include_directories(dalahash_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/redis)
 add_executable(dst_tests
     net/dst_test.cpp
 )
-# sim_io_backend.h lives in tests/net/; also needs src/redis and src/net headers
+# sim_io_backend.h lives in tests/net/; also needs src/net headers
 target_include_directories(dst_tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/net
-    ${CMAKE_SOURCE_DIR}/src/redis
     ${CMAKE_SOURCE_DIR}/src/net
 )
 target_link_libraries(dst_tests dalahash_lib GTest::gtest_main)

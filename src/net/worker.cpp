@@ -2,9 +2,7 @@
 
 #include "worker.h"
 #include "connection.h"
-#include "redis/command.h"
-#include "redis/resp.h"
-#include "redis/store.h"
+#include "protocol/protocol.h"
 
 #include <arpa/inet.h>
 #include <cerrno>
@@ -513,7 +511,8 @@ static void handle_accept(const IoCompletion *comp, Connection **conns,
 }
 
 static void handle_recv(const IoCompletion *comp, Connection **conns,
-                        Store *store, IoOps *ops, IoBackend *backend,
+                        ProtocolWorkerState *protocol_state,
+                        IoOps *ops, IoBackend *backend,
                         WorkerState *state, RecycleBatch *recycle,
                         TxSlabPool *pool) {
     int fd = comp->fd;
@@ -524,7 +523,7 @@ static void handle_recv(const IoCompletion *comp, Connection **conns,
 
     Connection *conn = conns[fd];
 
-        //  Buffer exhaustion: kernel terminated multishot recv with -ENOBUFS.
+    //  Buffer exhaustion: kernel terminated multishot recv with -ENOBUFS.
     // No data to parse — just rearm recv so it resumes after buffers recycle.
     if (!comp->buf && comp->buf_len == 0) {
         if (!comp->more && !conn->closing) {
@@ -534,39 +533,39 @@ static void handle_recv(const IoCompletion *comp, Connection **conns,
         return;
     }
 
-    const uint8_t *parse_buf = nullptr; // points to comp->buf or conn->read_buf
+    const uint8_t *parse_buf = nullptr; // points to comp->buf or conn->input_buf
     uint32_t parse_len = 0;
-    bool parsing_from_conn_buf = false;
+    bool parsing_from_input_buf = false;
     uint32_t offset = 0;
     uint8_t response_tmp[RESPONSE_BUF_SIZE];   // one command response at a time
     uint8_t response_batch[RESPONSE_BUF_SIZE]; // coalesced pipeline send
     uint32_t response_batch_len = 0;
 
-        //  Reassembly path: append new bytes directly into conn->read_buf so parser
+    //  Reassembly path: append new bytes directly into conn->input_buf so parser
     // sees one contiguous stream. If it would overflow the bounded buffer,
     // close the connection (no silent truncation).
-    if (conn->read_len > 0) {
-        if (conn->read_len + comp->buf_len > CONN_BUF_SIZE) {
+    if (conn->input_len > 0) {
+        if (conn->input_len + comp->buf_len > CONN_BUF_SIZE) {
             try_close(fd, conns, ops, backend, state, pool);
             goto recycle;
         }
-        std::memcpy(conn->read_buf + conn->read_len, comp->buf, comp->buf_len);
-        parse_buf = conn->read_buf;
-        parse_len = conn->read_len + comp->buf_len;
-        conn->read_len = 0;
-        parsing_from_conn_buf = true;
+        std::memcpy(conn->input_buf + conn->input_len, comp->buf, comp->buf_len);
+        parse_buf = conn->input_buf;
+        parse_len = conn->input_len + comp->buf_len;
+        conn->input_len = 0;
+        parsing_from_input_buf = true;
     } else {
         parse_buf = comp->buf;
         parse_len = comp->buf_len;
     }
 
     while (offset < parse_len) {
-        RespCommand cmd;
+        ProtocolCommand cmd;
         uint32_t consumed = 0;
-        RespParseResult result = resp_parse(parse_buf + offset, parse_len - offset, &cmd, &consumed);
+        ProtocolParseResult result = protocol_parse(parse_buf + offset, parse_len - offset, &cmd, &consumed);
 
-        if (result == RespParseResult::OK) {
-            uint32_t resp_len = command_execute(&cmd, store, response_tmp, RESPONSE_BUF_SIZE);
+        if (result == PROTOCOL_PARSE_OK) {
+            uint32_t resp_len = protocol_execute(&cmd, protocol_state, response_tmp, RESPONSE_BUF_SIZE);
             if (resp_len > RESPONSE_BUF_SIZE) {
                 try_close(fd, conns, ops, backend, state, pool);
                 goto recycle;
@@ -592,7 +591,7 @@ static void handle_recv(const IoCompletion *comp, Connection **conns,
             continue;
         }
 
-        if (result == RespParseResult::INCOMPLETE) {
+        if (result == PROTOCOL_PARSE_INCOMPLETE) {
             uint32_t remaining = parse_len - offset;
             if (remaining > CONN_BUF_SIZE) {
                 try_close(fd, conns, ops, backend, state, pool);
@@ -601,14 +600,14 @@ static void handle_recv(const IoCompletion *comp, Connection **conns,
 
             // Preserve trailing partial command bytes for next recv.
             if (remaining > 0) {
-                if (parsing_from_conn_buf) {
+                if (parsing_from_input_buf) {
                     if (offset > 0)
-                        std::memmove(conn->read_buf, conn->read_buf + offset, remaining);
+                        std::memmove(conn->input_buf, conn->input_buf + offset, remaining);
                 } else {
-                    std::memcpy(conn->read_buf, parse_buf + offset, remaining);
+                    std::memcpy(conn->input_buf, parse_buf + offset, remaining);
                 }
             }
-            conn->read_len = remaining;
+            conn->input_len = remaining;
             break;
         }
 
@@ -753,7 +752,8 @@ int worker_run(WorkerConfig *config) {
     }
 
     Connection *conns[MAX_CONNECTIONS] = {};
-    Store store = {};
+    ProtocolWorkerState protocol_state = {};
+    protocol_worker_init(&protocol_state);
     IoCompletion completions[MAX_COMPLETIONS];
     WorkerState wstate = {};
     TxSlabPool tx_pool = {};
@@ -814,7 +814,7 @@ int worker_run(WorkerConfig *config) {
                               listen_fd, &wstate, &tx_pool);
                 break;
             case IoCompletion::RECV:
-                handle_recv(c, conns, &store, &config->ops, config->backend,
+                handle_recv(c, conns, &protocol_state, &config->ops, config->backend,
                             &wstate, &recycle, &tx_pool);
                 break;
             case IoCompletion::SEND:
