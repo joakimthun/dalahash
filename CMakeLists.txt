@@ -22,10 +22,12 @@ add_compile_options(-fno-exceptions -Wall -Wextra)
 # - CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE: enables LTO/IPO so the optimizer
 #   can inline and optimize hot paths across translation units.
 # - -march=native and -mtune=native: generate/schedule code for this host CPU.
+# - -fuse-ld=lld: use LLVM's linker for reliable and faster LTO linking.
 # These are Release-only by design; Debug/sanitizer builds keep normal toolchain behavior.
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 add_compile_options($<$<CONFIG:Release>:-march=native> $<$<CONFIG:Release>:-mtune=native>)
 add_link_options(
+    $<$<CONFIG:Release>:-fuse-ld=lld>
     $<$<CONFIG:Release>:-march=native>
     $<$<CONFIG:Release>:-mtune=native>
 )
