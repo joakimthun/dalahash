@@ -890,3 +890,157 @@ TEST(DSTIntegration, CloseRetryOnlyOnENOSPC) {
     worker_run(&config);
     EXPECT_EQ(sim.submit_close_call_count, 1);
 }
+
+TEST(DSTIntegration, TxHighWatermarkClosesConnection) {
+    // Fill TX queue past 1 MiB backpressure limit, verify connection closed.
+    SimIoBackend sim_setup;
+
+    // Build a large pipelined payload: many SET commands whose responses will
+    // queue up. We make submit_send fail so responses accumulate in TX queue.
+    std::string cmds;
+    // Each +OK\r\n is 5 bytes. To exceed 1 MiB (1048576) we need ~210000 cmds.
+    // But that's too slow. Instead, use large GET responses.
+    // SET a big value, then GET it many times so responses pile up.
+    std::string big_value(4000, 'X');
+    std::string set_cmd = "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$4000\r\n" + big_value + "\r\n";
+    std::string get_cmd = "*2\r\n$3\r\nGET\r\n$1\r\nk\r\n";
+
+    // Each GET response is ~"$4000\r\n" + 4000 bytes + "\r\n" ≈ 4010 bytes.
+    // Need ~262 GETs to exceed 1 MiB.
+    std::string gets;
+    for (int i = 0; i < 300; i++) gets += get_cmd;
+
+    SimIoBackend sim;
+    sim.pending.push_back(sim_accept(10));
+    sim.pending.push_back(sim_recv(&sim_setup, 10, set_cmd.data(), static_cast<uint32_t>(set_cmd.size())));
+    // Make sends fail so TX queue fills up.
+    sim.submit_send_fail_count = 999;
+    sim.pending.push_back(sim_recv(&sim_setup, 10, gets.data(), static_cast<uint32_t>(gets.size())));
+
+    std::atomic<bool> running{true};
+    sim.running = &running;
+
+    WorkerConfig config = {};
+    config.cpu_id = 0;
+    config.ops = sim_io_ops();
+    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.running = &running;
+    config.skip_setup = true;
+    config.listen_fd = 0;
+
+    worker_run(&config);
+
+    // Connection should have been closed due to backpressure.
+    bool was_closed = false;
+    for (int fd : sim.closed_fds) {
+        if (fd == 10) { was_closed = true; break; }
+    }
+    EXPECT_TRUE(was_closed);
+}
+
+TEST(DSTIntegration, ReassemblyAtStructureBoundaries) {
+    // Split a SET command at various RESP structure boundaries.
+    SimIoBackend sim_setup;
+    std::string full = "*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n";
+
+    // Split points: after '*', after '3', inside first \r\n, after $, inside
+    // bulk data, etc.
+    size_t splits[] = {1, 2, 3, 4, 8, 10, 14, 18, 22, 26, 30};
+    for (size_t split : splits) {
+        if (split >= full.size()) continue;
+
+        std::vector<IoCompletion> events;
+        events.push_back(sim_accept(10));
+        events.push_back(sim_recv(&sim_setup, 10, full.data(), static_cast<uint32_t>(split)));
+        events.push_back(sim_recv(&sim_setup, 10, full.data() + split, static_cast<uint32_t>(full.size() - split)));
+
+        SimIoBackend result = run_worker_sim(events);
+        EXPECT_EQ(result.sent_data[10], "+OK\r\n")
+            << "Failed at split point " << split;
+    }
+}
+
+TEST(DST, BinaryKeyValueViaDST) {
+    // SET/GET with keys/values containing \0, \r, \n.
+    ProtocolWorkerState state = {};
+    protocol_worker_init(&state);
+    Connection *conn = connection_create(10);
+
+    // Key: "k\0y" (3 bytes), Value: "v\r\n" (3 bytes)
+    uint8_t key[] = {'k', 0x00, 'y'};
+    uint8_t val[] = {'v', '\r', '\n'};
+
+    std::string set_data = "*3\r\n$3\r\nSET\r\n$3\r\n";
+    set_data.append(reinterpret_cast<char *>(key), 3);
+    set_data += "\r\n$3\r\n";
+    set_data.append(reinterpret_cast<char *>(val), 3);
+    set_data += "\r\n";
+
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(set_data.data()),
+                           static_cast<uint32_t>(set_data.size()), &state), "+OK\r\n");
+
+    std::string get_data = "*2\r\n$3\r\nGET\r\n$3\r\n";
+    get_data.append(reinterpret_cast<char *>(key), 3);
+    get_data += "\r\n";
+
+    std::string resp = process_recv(conn, reinterpret_cast<const uint8_t *>(get_data.data()),
+                                    static_cast<uint32_t>(get_data.size()), &state);
+    // Expected: "$3\r\nv\r\n\r\n" — bulk string with the binary value.
+    EXPECT_EQ(resp.size(), 9u); // "$3\r\n" (4) + "v\r\n" (3) + "\r\n" (2)
+    EXPECT_TRUE(resp.starts_with("$3\r\n"));
+    EXPECT_EQ(resp[4], 'v');
+    EXPECT_EQ(resp[5], '\r');
+    EXPECT_EQ(resp[6], '\n');
+
+    connection_destroy(conn);
+}
+
+TEST(DST, EmptyKeyAndEmptyValue) {
+    // SET/GET with zero-length key and value.
+    ProtocolWorkerState state = {};
+    protocol_worker_init(&state);
+    Connection *conn = connection_create(10);
+
+    std::string set_data = "*3\r\n$3\r\nSET\r\n$0\r\n\r\n$0\r\n\r\n";
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(set_data.data()),
+                           static_cast<uint32_t>(set_data.size()), &state), "+OK\r\n");
+
+    std::string get_data = "*2\r\n$3\r\nGET\r\n$0\r\n\r\n";
+    std::string resp = process_recv(conn, reinterpret_cast<const uint8_t *>(get_data.data()),
+                                    static_cast<uint32_t>(get_data.size()), &state);
+    EXPECT_EQ(resp, "$0\r\n\r\n");
+
+    connection_destroy(conn);
+}
+
+TEST(DSTIntegration, MultiPartPartialSend) {
+    // Multiple PINGs with response split across 5 partial sends.
+    SimIoBackend sim_setup;
+    std::string pings;
+    for (int i = 0; i < 3; i++) pings += "*1\r\n$4\r\nPING\r\n";
+    // 3 x "+PONG\r\n" = 21 bytes total response
+
+    SimIoBackend sim;
+    sim.pending.push_back(sim_accept(10));
+    sim.pending.push_back(sim_recv(&sim_setup, 10, pings.data(), static_cast<uint32_t>(pings.size())));
+    sim.copy_send_on_wait = true;
+    sim.scripted_send_results = {4, 5, 4, 5, 3}; // 4+5+4+5+3 = 21 bytes
+
+    std::atomic<bool> running{true};
+    sim.running = &running;
+
+    WorkerConfig config = {};
+    config.cpu_id = 0;
+    config.ops = sim_io_ops();
+    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.running = &running;
+    config.skip_setup = true;
+    config.listen_fd = 0;
+
+    worker_run(&config);
+
+    std::string expected;
+    for (int i = 0; i < 3; i++) expected += "+PONG\r\n";
+    EXPECT_EQ(sim.sent_data[10], expected);
+    EXPECT_EQ(sim.send_call_count, 5);
+}

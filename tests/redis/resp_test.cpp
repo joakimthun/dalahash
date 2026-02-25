@@ -327,3 +327,87 @@ TEST(RespFormat, WriteErrorEmpty) {
     uint32_t n = resp_write_error(buf, "");
     EXPECT_EQ(std::string(reinterpret_cast<char *>(buf), n), "-ERR \r\n");
 }
+
+TEST(RespFormat, WriteErrorTruncation) {
+    // 600-char message should be truncated; returned length must not exceed 511.
+    std::string long_msg(600, 'Z');
+    uint8_t buf[1024];
+    uint32_t n = resp_write_error(buf, long_msg.c_str());
+    EXPECT_LE(n, 511u);
+    EXPECT_GT(n, 0u);
+    // Output should start with the error prefix.
+    std::string result(reinterpret_cast<char *>(buf), n);
+    EXPECT_TRUE(result.starts_with("-ERR "));
+}
+
+// --- parse_int validation tests ---
+
+TEST(RespParse, NonDigitInArrayCount) {
+    // '*' followed by digits then a letter before \r\n → ERROR.
+    std::string input = "*2A\r\n$3\r\nGET\r\n$3\r\nfoo\r\n";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::ERROR);
+}
+
+TEST(RespParse, NonDigitInBulkLength) {
+    // Bulk string length with non-digit → ERROR.
+    std::string input = "*1\r\n$3x\r\nGET\r\n";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::ERROR);
+}
+
+TEST(RespParse, OverflowArrayCount) {
+    // Huge number that overflows int → ERROR.
+    std::string input = "*99999999999\r\n";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::ERROR);
+}
+
+TEST(RespParse, OverflowBulkLength) {
+    // Huge bulk string length that overflows int → ERROR.
+    std::string input = "*1\r\n$99999999999\r\nfoo\r\n";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::ERROR);
+}
+
+TEST(RespParse, LetterOnlyCount) {
+    // Array count with only letters → ERROR.
+    std::string input = "*abc\r\n";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::ERROR);
+}
+
+TEST(RespParse, EmptyDigitsInArrayCount) {
+    // No digits between '*' and '\r\n' → ERROR.
+    std::string input = "*\r\n";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::ERROR);
+}
+
+TEST(RespParse, SpaceInCount) {
+    // Space before digits → ERROR (space is not a digit).
+    std::string input = "* 2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::ERROR);
+}

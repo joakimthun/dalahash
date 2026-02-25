@@ -2,8 +2,14 @@
 
 #include "resp.h"
 
+#include <climits>
 #include <cstdio>
 #include <cstring>
+
+struct ParseIntResult {
+    int value;
+    bool error; // true = malformed input (non-digit, overflow, empty)
+};
 
 //  Reads a signed decimal integer starting at buf[*pos], then advances *pos
 // past the mandatory \r\n terminator.
@@ -13,19 +19,37 @@
 //   $5    — bulk string of 5 bytes
 //   $-1   — null bulk string (negative, only valid length)
 //
-// Returns the parsed integer, or -1 if the \r\n hasn't arrived yet.
-// The -1-on-incomplete sentinel is unambiguous here: callers check $-1 (null
-// bulk string) only on the length slot, and treat -1 as null, not as error.
-static int parse_int(const uint8_t *buf, uint32_t len, uint32_t *pos) {
+// Returns {value, false} on success, {-1, false} if \r\n hasn't arrived yet
+// (INCOMPLETE), or {0, true} on malformed input (non-digit, overflow, empty).
+static ParseIntResult parse_int(const uint8_t *buf, uint32_t len, uint32_t *pos) {
     int n = 0;
     bool negative = false;
+    bool has_digits = false;
+    uint32_t start = *pos;
+
     if (*pos < len && buf[*pos] == '-') { negative = true; (*pos)++; }
-    // Accumulate digits until we hit \r or exhaust the buffer.
-    while (*pos < len && buf[*pos] != '\r') { n = n * 10 + (buf[*pos] - '0'); (*pos)++; }
+
+    while (*pos < len && buf[*pos] != '\r') {
+        uint8_t c = buf[*pos];
+        if (c < '0' || c > '9') { *pos = start; return {0, true}; }
+        int digit = c - '0';
+        // Overflow check: n * 10 + digit > INT_MAX
+        if (n > INT_MAX / 10 || (n == INT_MAX / 10 && digit > 7)) {
+            *pos = start; return {0, true};
+        }
+        n = n * 10 + digit;
+        has_digits = true;
+        (*pos)++;
+    }
+
     // Need at least \r and \n still in the buffer.
-    if (*pos + 1 >= len) return -1;
+    if (*pos + 1 >= len) { *pos = start; return {-1, false}; }
+
+    // No digits between prefix and \r is malformed (e.g. "*\r\n").
+    if (!has_digits) { *pos = start; return {0, true}; }
+
     *pos += 2; // skip \r\n
-    return negative ? -n : n;
+    return {negative ? -n : n, false};
 }
 
 //  Parse one complete RESP command from data[0..len).
@@ -51,7 +75,8 @@ RespParseResult resp_parse(const uint8_t *data, uint32_t len,
     pos++;
 
     // Array element count.
-    int argc = parse_int(data, len, &pos);
+    auto [argc, argc_err] = parse_int(data, len, &pos);
+    if (argc_err) return RespParseResult::ERROR;
     if (argc < 0) { *consumed = 0; return RespParseResult::INCOMPLETE; }
     if (argc < 1 || argc > RESP_MAX_ARGS) return RespParseResult::ERROR;
     cmd->argc = argc;
@@ -64,7 +89,8 @@ RespParseResult resp_parse(const uint8_t *data, uint32_t len,
         pos++;
 
         // Bulk string byte length (may be -1 for null, but not in requests).
-        int slen = parse_int(data, len, &pos);
+        auto [slen, slen_err] = parse_int(data, len, &pos);
+        if (slen_err) return RespParseResult::ERROR;
         if (slen < 0) { *consumed = 0; return RespParseResult::INCOMPLETE; }
 
         // Check that the full payload + trailing \r\n is present.
@@ -107,7 +133,9 @@ uint32_t resp_write_bulk(uint8_t *out, const uint8_t *data, uint32_t len) {
 
 // Emit "-ERR <msg>\r\n" — RESP error, truncated to 512 bytes total.
 uint32_t resp_write_error(uint8_t *out, const char *msg) {
-    return static_cast<uint32_t>(std::snprintf(reinterpret_cast<char *>(out), 512, "-ERR %s\r\n", msg));
+    int n = std::snprintf(reinterpret_cast<char *>(out), 512, "-ERR %s\r\n", msg);
+    if (n <= 0) return 0;
+    return static_cast<uint32_t>(n >= 512 ? 511 : n);
 }
 
 // Emit "+PONG\r\n" — RESP simple string reply to PING.
