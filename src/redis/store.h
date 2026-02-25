@@ -1,31 +1,141 @@
-//  store.h — Per-thread key-value store (v1: single-threaded, no locking).
-//
-// Each worker owns its own Store; all access is from one thread, so no
-// synchronisation is needed. v2 will introduce a shared store.
+// store.h — Redis-facing wrapper around shared kv store.
 
 #pragma once
 
-#include <string>
-#include <string_view>
-#include <unordered_map>
+#include "kv/shared_kv_store.h"
 
-struct Store {
-    std::unordered_map<std::string, std::string> data;
+#include <string_view>
+
+enum class StoreSetStatus : uint8_t {
+    OK = 0,
+    OOM = 1,
+    INVALID = 2,
 };
 
-//  Returns a pointer directly into the map node (no copy of the value).
-// The pointer is stable until the next store_set on the same key or store
-// destruction. Returns nullptr on miss.
-// Note: std::string(key) allocates on every call; a map with heterogeneous
-// lookup (find(string_view)) would avoid this allocation on the lookup path.
-inline const std::string *store_get(Store *s, std::string_view key) {
-    auto it = s->data.find(std::string(key));
-    if (it == s->data.end()) return nullptr;
-    return &it->second;
+struct StoreValueView {
+    const uint8_t *data;
+    uint32_t len;
+};
+
+struct Store {
+    KvStore *kv = nullptr;
+    uint32_t worker_id = 0;
+    bool owns_kv = false;
+
+    Store() = default;
+
+    Store(const Store &) = delete;
+    Store &operator=(const Store &) = delete;
+
+    Store(Store &&other) noexcept {
+        kv = other.kv;
+        worker_id = other.worker_id;
+        owns_kv = other.owns_kv;
+        other.kv = nullptr;
+        other.worker_id = 0;
+        other.owns_kv = false;
+    }
+
+    Store &operator=(Store &&other) noexcept {
+        if (this == &other) return *this;
+        if (owns_kv && kv) kv_store_destroy(kv);
+        kv = other.kv;
+        worker_id = other.worker_id;
+        owns_kv = other.owns_kv;
+        other.kv = nullptr;
+        other.worker_id = 0;
+        other.owns_kv = false;
+        return *this;
+    }
+
+    ~Store() {
+        if (owns_kv && kv) kv_store_destroy(kv);
+        kv = nullptr;
+        worker_id = 0;
+        owns_kv = false;
+    }
+};
+
+inline bool store_ensure_local(Store *s) {
+    if (!s) return false;
+    if (s->kv) return true;
+
+    KvStoreConfig cfg = {
+        .capacity_bytes = 8ull << 20, // tests/local fallback
+        .shard_count = 16,
+        .buckets_per_shard = 0,
+        .worker_count = 1,
+    };
+
+    KvStore *kv = kv_store_create(&cfg);
+    if (!kv) return false;
+    kv_store_register_worker(kv, 0);
+
+    s->kv = kv;
+    s->worker_id = 0;
+    s->owns_kv = true;
+    return true;
 }
 
-//  Inserts or overwrites key → value. Both string_views are copied into
-// heap-allocated std::strings owned by the map.
-inline void store_set(Store *s, std::string_view key, std::string_view value) {
-    s->data[std::string(key)] = std::string(value);
+inline void store_reset(Store *s) {
+    if (!s) return;
+    if (s->owns_kv && s->kv) kv_store_destroy(s->kv);
+    s->kv = nullptr;
+    s->worker_id = 0;
+    s->owns_kv = false;
+}
+
+inline void store_bind_shared(Store *s, KvStore *kv, uint32_t worker_id) {
+    if (!s) return;
+    if (s->owns_kv && s->kv) kv_store_destroy(s->kv);
+    s->kv = kv;
+    s->worker_id = worker_id;
+    s->owns_kv = false;
+}
+
+inline void store_quiescent(Store *s) {
+    if (!s || !s->kv) return;
+    kv_store_quiescent(s->kv, s->worker_id);
+}
+
+inline bool store_get(Store *s, std::string_view key, StoreValueView *out) {
+    if (!out) return false;
+    out->data = nullptr;
+    out->len = 0;
+    if (!store_ensure_local(s)) return false;
+
+    KvValueView view = {};
+    KvGetStatus st = kv_store_get(s->kv, s->worker_id, key, kv_time_now_ms(), &view);
+    if (st != KvGetStatus::HIT) return false;
+    out->data = view.data;
+    out->len = view.len;
+    return true;
+}
+
+inline StoreSetStatus store_set(Store *s, std::string_view key, std::string_view value) {
+    if (!store_ensure_local(s)) return StoreSetStatus::INVALID;
+    KvSetStatus st = kv_store_set(s->kv, s->worker_id, key, value, kv_time_now_ms(), nullptr);
+    if (st == KvSetStatus::OK) return StoreSetStatus::OK;
+    if (st == KvSetStatus::OOM) return StoreSetStatus::OOM;
+    return StoreSetStatus::INVALID;
+}
+
+inline StoreSetStatus store_set_expire_after_ms(Store *s, std::string_view key,
+                                                std::string_view value, uint64_t ttl_ms) {
+    if (!store_ensure_local(s)) return StoreSetStatus::INVALID;
+    KvSetOptions opts = {.mode = KvExpireMode::AFTER_MS, .value_ms = ttl_ms};
+    KvSetStatus st = kv_store_set(s->kv, s->worker_id, key, value, kv_time_now_ms(), &opts);
+    if (st == KvSetStatus::OK) return StoreSetStatus::OK;
+    if (st == KvSetStatus::OOM) return StoreSetStatus::OOM;
+    return StoreSetStatus::INVALID;
+}
+
+inline StoreSetStatus store_set_expire_at_ms(Store *s, std::string_view key,
+                                             std::string_view value, uint64_t at_ms) {
+    if (!store_ensure_local(s)) return StoreSetStatus::INVALID;
+    KvSetOptions opts = {.mode = KvExpireMode::AT_MS, .value_ms = at_ms};
+    KvSetStatus st = kv_store_set(s->kv, s->worker_id, key, value, kv_time_now_ms(), &opts);
+    if (st == KvSetStatus::OK) return StoreSetStatus::OK;
+    if (st == KvSetStatus::OOM) return StoreSetStatus::OOM;
+    return StoreSetStatus::INVALID;
 }

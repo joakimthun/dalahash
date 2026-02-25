@@ -1,7 +1,12 @@
 build/
 build-echo/
+build_echo/
+build-redis/
+build_redis/
 build-lsan/
+build_lsan/
 build-asan/
+build_asan/
 *.md
 *.local.json
 notes.txt

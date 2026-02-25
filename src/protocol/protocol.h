@@ -5,6 +5,7 @@
 // The networking worker is protocol-agnostic. It includes this header and calls
 // a small set of protocol symbols on the hot path:
 //   - protocol_worker_init(...)
+//   - protocol_worker_quiescent(...)
 //   - protocol_parse(...)
 //   - protocol_execute(...)
 //
@@ -25,8 +26,7 @@
 //      Parse status returned by protocol_parse.
 //
 //    - struct ProtocolWorkerState
-//      Per-worker protocol state (owned by worker thread; no cross-thread
-//      sharing). For Redis this owns the per-worker Store.
+//      Per-worker protocol state.
 //
 // 2) Result constants used by worker hot path
 //    - PROTOCOL_PARSE_OK
@@ -34,8 +34,12 @@
 //    - PROTOCOL_PARSE_ERROR
 //
 // 3) Functions
-//    - inline void protocol_worker_init(ProtocolWorkerState *state)
+//    - inline void protocol_worker_init(ProtocolWorkerState *state,
+//                                       const ProtocolInitContext *ctx)
 //      Called once per worker before entering event loop.
+//
+//    - inline void protocol_worker_quiescent(ProtocolWorkerState *state)
+//      Called from worker loop quiescent points.
 //
 //    - inline ProtocolParseResult protocol_parse(const uint8_t *data,
 //                                                uint32_t len,
@@ -81,6 +85,16 @@
 
 #pragma once
 
+#include <cstdint>
+
+struct KvStore;
+
+struct ProtocolInitContext {
+    KvStore *shared_store;
+    uint32_t worker_id;
+    uint32_t worker_count;
+};
+
 #if defined(DALAHASH_PROTOCOL_REDIS) && DALAHASH_PROTOCOL_REDIS
 #include "protocol/redis/redis_protocol.h"
 #elif defined(DALAHASH_PROTOCOL_ECHO) && DALAHASH_PROTOCOL_ECHO
@@ -88,3 +102,4 @@
 #else
 #error "No protocol selected. Set DALAHASH_PROTOCOL (redis/echo) in CMake."
 #endif
+

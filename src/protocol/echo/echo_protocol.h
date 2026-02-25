@@ -15,6 +15,8 @@
 #include <cstdint>
 #include <cstring>
 
+struct ProtocolInitContext;
+
 // Parsed command for echo: just a byte span.
 // data points into worker-provided parse buffer and is consumed immediately
 // by protocol_execute in the same loop iteration.
@@ -35,7 +37,10 @@ static constexpr ProtocolParseResult PROTOCOL_PARSE_ERROR = ProtocolParseResult:
 struct ProtocolWorkerState {};
 
 // No-op initializer required by protocol.h contract.
-inline void protocol_worker_init(ProtocolWorkerState *) {}
+inline void protocol_worker_init(ProtocolWorkerState *,
+                                 const ProtocolInitContext * = nullptr) {}
+
+inline void protocol_worker_quiescent(ProtocolWorkerState *) {}
 
 // Parse one echo command from [data, data + len).
 //

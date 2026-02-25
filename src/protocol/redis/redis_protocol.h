@@ -20,6 +20,8 @@
 
 #include <cstdint>
 
+struct ProtocolInitContext;
+
 // One parsed protocol command is exactly one parsed RESP command.
 using ProtocolCommand = RespCommand;
 // Parse status is directly the RESP parser result enum.
@@ -31,14 +33,22 @@ static constexpr ProtocolParseResult PROTOCOL_PARSE_INCOMPLETE = ProtocolParseRe
 static constexpr ProtocolParseResult PROTOCOL_PARSE_ERROR = ProtocolParseResult::ERROR;
 
 // Per-worker protocol state.
-// Redis mode keeps a dedicated Store per worker thread (no shared locks).
 struct ProtocolWorkerState {
     Store store;
 };
 
 // Initialize per-worker Redis state before event loop starts.
-inline void protocol_worker_init(ProtocolWorkerState *state) {
-    state->store = {};
+inline void protocol_worker_init(ProtocolWorkerState *state,
+                                 const ProtocolInitContext *ctx = nullptr) {
+    store_reset(&state->store);
+    if (ctx && ctx->shared_store) {
+        store_bind_shared(&state->store, ctx->shared_store, ctx->worker_id);
+        (void)kv_store_register_worker(ctx->shared_store, ctx->worker_id);
+    }
+}
+
+inline void protocol_worker_quiescent(ProtocolWorkerState *state) {
+    store_quiescent(&state->store);
 }
 
 // Parse one RESP command from [data, data + len).

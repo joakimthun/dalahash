@@ -3,7 +3,6 @@
 #include "command.h"
 #include <cstdio>
 #include <cstring>
-#include <limits>
 
 //  Case-insensitive argument match via clearing bit 5 (0x20): 'a'→'A', 'g'→'G'.
 // Works for ASCII letters only, which covers all Redis command verbs.
@@ -44,30 +43,29 @@ uint32_t command_execute(const RespCommand *cmd, Store *store,
             return write_error_bounded(out_buf, out_buf_size, "wrong number of arguments for 'get' command");
         // args[1] points into the receive buffer — construct string_view without copy.
         std::string_view key(reinterpret_cast<const char *>(cmd->args[1].data), cmd->args[1].len);
-                //  store_get returns a pointer into the map; resp_write_bulk copies the
-        // value bytes into out_buf for the async send.
-        const std::string *val = store_get(store, key);
-        if (!val) {
+        StoreValueView val = {};
+        if (!store_get(store, key, &val)) {
             if (out_buf_size < 5) return write_error_bounded(out_buf, out_buf_size, "output buffer too small");
             return resp_write_null(out_buf);
         }
-        if (val->size() > std::numeric_limits<uint32_t>::max())
-            return write_error_bounded(out_buf, out_buf_size, "response too large");
-        uint32_t val_len = static_cast<uint32_t>(val->size());
+        uint32_t val_len = val.len;
         uint64_t needed = 1ull + decimal_len_u32(val_len) + 2ull + val_len + 2ull;
         if (needed > out_buf_size)
             return write_error_bounded(out_buf, out_buf_size, "response too large");
-        return resp_write_bulk(out_buf, reinterpret_cast<const uint8_t *>(val->data()), static_cast<uint32_t>(val->size()));
+        return resp_write_bulk(out_buf, val.data, val.len);
     }
 
     if (arg_matches(verb, "SET", 3)) {
         if (cmd->argc != 3)
             return write_error_bounded(out_buf, out_buf_size, "wrong number of arguments for 'set' command");
-                //  args[1] and args[2] point into the receive buffer. store_set copies
-        // both key and value into std::string heap allocations in the map.
+        // args[1] and args[2] point into receive buffer; store_set copies bytes.
         std::string_view key(reinterpret_cast<const char *>(cmd->args[1].data), cmd->args[1].len);
         std::string_view value(reinterpret_cast<const char *>(cmd->args[2].data), cmd->args[2].len);
-        store_set(store, key, value);
+        StoreSetStatus set_status = store_set(store, key, value);
+        if (set_status == StoreSetStatus::OOM)
+            return write_error_bounded(out_buf, out_buf_size, "out of memory");
+        if (set_status != StoreSetStatus::OK)
+            return write_error_bounded(out_buf, out_buf_size, "store failure");
         if (out_buf_size < 5) return write_error_bounded(out_buf, out_buf_size, "output buffer too small");
         return resp_write_ok(out_buf);
     }

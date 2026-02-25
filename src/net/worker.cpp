@@ -753,7 +753,12 @@ int worker_run(WorkerConfig *config) {
 
     Connection *conns[MAX_CONNECTIONS] = {};
     ProtocolWorkerState protocol_state = {};
-    protocol_worker_init(&protocol_state);
+    ProtocolInitContext protocol_ctx = {
+        .shared_store = config->shared_store,
+        .worker_id = config->worker_id,
+        .worker_count = config->worker_count,
+    };
+    protocol_worker_init(&protocol_state, &protocol_ctx);
     IoCompletion completions[MAX_COMPLETIONS];
     WorkerState wstate = {};
     TxSlabPool tx_pool = {};
@@ -762,6 +767,8 @@ int worker_run(WorkerConfig *config) {
         wstate.accept_needs_rearm = true;
 
     while (config->running->load(std::memory_order_relaxed)) {
+        protocol_worker_quiescent(&protocol_state);
+
         // Drain deferred retries from the previous iteration.
         if (wstate.accept_needs_rearm) {
             if (config->ops.submit_accept(config->backend, listen_fd) == 0)
@@ -836,6 +843,8 @@ int worker_run(WorkerConfig *config) {
 
         recycle_flush(&recycle, &config->ops, config->backend);
     }
+
+    protocol_worker_quiescent(&protocol_state);
 
     if (!config->skip_setup && listen_fd >= 0) close(listen_fd);
     if (config->backend) config->ops.destroy(config->backend);

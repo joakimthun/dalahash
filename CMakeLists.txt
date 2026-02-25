@@ -61,6 +61,7 @@ find_path(URING_INCLUDE liburing.h REQUIRED)
 # Core library — all dalahash logic except main(). Linked by both the
 # executable and test targets so tests can access internal functions.
 add_library(dalahash_lib STATIC
+    src/kv/shared_kv_store.cpp
     src/redis/resp.cpp
     src/redis/command.cpp
     src/net/io_uring_backend.cpp

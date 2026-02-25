@@ -7,6 +7,7 @@
 #include <cstring>
 #include <gtest/gtest.h>
 #include <string>
+#include <vector>
 
 static RespCommand make_cmd(std::initializer_list<const char *> args) {
     RespCommand cmd = {};
@@ -218,4 +219,37 @@ TEST(Command, OutputBufferExactFitSet) {
     // "+OK\r\n" is 5 bytes; buffer of exactly 5 should work.
     std::string result = exec_sized(make_cmd({"SET", "k", "v"}), &store, 5);
     EXPECT_EQ(result, "+OK\r\n");
+}
+
+TEST(Command, SetOOMReturnsErr) {
+    KvStoreConfig cfg = {
+        .capacity_bytes = 128,
+        .shard_count = 1,
+        .buckets_per_shard = 16,
+        .worker_count = 1,
+    };
+    KvStore *shared = kv_store_create(&cfg);
+    ASSERT_NE(shared, nullptr);
+    ASSERT_EQ(kv_store_register_worker(shared, 0), 0);
+
+    Store store;
+    store_bind_shared(&store, shared, 0);
+
+    std::string big(256, 'x');
+    RespCommand cmd = {};
+    const char *set_str = "SET";
+    const char *key = "k";
+    cmd.args[0].data = reinterpret_cast<const uint8_t *>(set_str);
+    cmd.args[0].len = 3;
+    cmd.args[1].data = reinterpret_cast<const uint8_t *>(key);
+    cmd.args[1].len = 1;
+    cmd.args[2].data = reinterpret_cast<const uint8_t *>(big.data());
+    cmd.args[2].len = static_cast<uint32_t>(big.size());
+    cmd.argc = 3;
+
+    std::string out = exec(cmd, &store);
+    EXPECT_TRUE(out.starts_with("-ERR"));
+    EXPECT_NE(out.find("out of memory"), std::string::npos);
+
+    kv_store_destroy(shared);
 }

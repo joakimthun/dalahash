@@ -1,6 +1,7 @@
 // server.cpp — Spawns worker threads, handles shutdown signals.
 
 #include "server.h"
+#include "kv/shared_kv_store.h"
 #include "io_uring_backend.h"
 #include "worker.h"
 
@@ -70,6 +71,20 @@ int server_start(const ServerConfig *config) {
         return 1;
     }
 
+    KvStoreConfig store_cfg = {
+        .capacity_bytes = config->store_bytes,
+        .shard_count = 0,
+        .buckets_per_shard = 0,
+        .worker_count = static_cast<uint32_t>(num_workers),
+    };
+    KvStore *shared_store = kv_store_create(&store_cfg);
+    if (!shared_store) {
+        std::fprintf(stderr, "dalahash: shared store init failed\n");
+        std::free(configs);
+        std::free(threads);
+        return 1;
+    }
+
     for (int i = 0; i < num_workers; i++) {
         IoBackend *backend = io_uring_backend_create(RING_SIZE, BUF_COUNT, BUF_SIZE);
         if (!backend) {
@@ -78,7 +93,10 @@ int server_start(const ServerConfig *config) {
             break;
         }
         configs[i] = {.cpu_id = i, .port = config->port, .ops = io_uring_ops(),
-                      .backend = backend, .running = &g_running};
+                      .backend = backend, .running = &g_running,
+                      .shared_store = shared_store,
+                      .worker_id = static_cast<uint32_t>(i),
+                      .worker_count = static_cast<uint32_t>(num_workers)};
 
         int ret = pthread_create(&threads[i], nullptr, worker_thread_fn, &configs[i]);
         if (ret != 0) {
@@ -95,6 +113,7 @@ int server_start(const ServerConfig *config) {
         if (threads[i]) pthread_join(threads[i], nullptr);
     }
 
+    kv_store_destroy(shared_store);
     std::free(configs);
     std::free(threads);
     std::fprintf(stderr, "dalahash: stopped\n");
