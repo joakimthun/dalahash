@@ -6,9 +6,11 @@
 #include <cstdio>
 #include <cstring>
 
+enum class ParseIntStatus : uint8_t { OK, INCOMPLETE, ERROR };
+
 struct ParseIntResult {
+    ParseIntStatus status;
     int value;
-    bool error; // true = malformed input (non-digit, overflow, empty)
 };
 
 //  Reads a signed decimal integer starting at buf[*pos], then advances *pos
@@ -19,8 +21,8 @@ struct ParseIntResult {
 //   $5    — bulk string of 5 bytes
 //   $-1   — null bulk string (negative, only valid length)
 //
-// Returns {value, false} on success, {-1, false} if \r\n hasn't arrived yet
-// (INCOMPLETE), or {0, true} on malformed input (non-digit, overflow, empty).
+// Returns ParseIntStatus::OK with parsed value on success, INCOMPLETE if the
+// full line has not arrived, or ERROR on malformed input.
 static ParseIntResult parse_int(const uint8_t *buf, uint32_t len, uint32_t *pos) {
     int n = 0;
     bool negative = false;
@@ -31,25 +33,44 @@ static ParseIntResult parse_int(const uint8_t *buf, uint32_t len, uint32_t *pos)
 
     while (*pos < len && buf[*pos] != '\r') {
         uint8_t c = buf[*pos];
-        if (c < '0' || c > '9') { *pos = start; return {0, true}; }
+        if (c < '0' || c > '9') {
+            *pos = start;
+            return {ParseIntStatus::ERROR, 0};
+        }
         int digit = c - '0';
         // Overflow check: n * 10 + digit > INT_MAX
         if (n > INT_MAX / 10 || (n == INT_MAX / 10 && digit > 7)) {
-            *pos = start; return {0, true};
+            *pos = start;
+            return {ParseIntStatus::ERROR, 0};
         }
         n = n * 10 + digit;
         has_digits = true;
         (*pos)++;
     }
 
+    if (*pos >= len) {
+        *pos = start;
+        return {ParseIntStatus::INCOMPLETE, 0};
+    }
+
     // Need at least \r and \n still in the buffer.
-    if (*pos + 1 >= len) { *pos = start; return {-1, false}; }
+    if (*pos + 1 >= len) {
+        *pos = start;
+        return {ParseIntStatus::INCOMPLETE, 0};
+    }
 
     // No digits between prefix and \r is malformed (e.g. "*\r\n").
-    if (!has_digits) { *pos = start; return {0, true}; }
+    if (!has_digits) {
+        *pos = start;
+        return {ParseIntStatus::ERROR, 0};
+    }
+    if (buf[*pos] != '\r' || buf[*pos + 1] != '\n') {
+        *pos = start;
+        return {ParseIntStatus::ERROR, 0};
+    }
 
     *pos += 2; // skip \r\n
-    return {negative ? -n : n, false};
+    return {ParseIntStatus::OK, negative ? -n : n};
 }
 
 //  Parse one complete RESP command from data[0..len).
@@ -75,9 +96,14 @@ RespParseResult resp_parse(const uint8_t *data, uint32_t len,
     pos++;
 
     // Array element count.
-    auto [argc, argc_err] = parse_int(data, len, &pos);
-    if (argc_err) return RespParseResult::ERROR;
-    if (argc < 0) { *consumed = 0; return RespParseResult::INCOMPLETE; }
+    ParseIntResult argc_parse = parse_int(data, len, &pos);
+    if (argc_parse.status == ParseIntStatus::INCOMPLETE) {
+        *consumed = 0;
+        return RespParseResult::INCOMPLETE;
+    }
+    if (argc_parse.status == ParseIntStatus::ERROR) return RespParseResult::ERROR;
+    int argc = argc_parse.value;
+    if (argc < 0) return RespParseResult::ERROR;
     if (argc < 1 || argc > RESP_MAX_ARGS) return RespParseResult::ERROR;
     cmd->argc = argc;
 
@@ -89,17 +115,28 @@ RespParseResult resp_parse(const uint8_t *data, uint32_t len,
         pos++;
 
         // Bulk string byte length (may be -1 for null, but not in requests).
-        auto [slen, slen_err] = parse_int(data, len, &pos);
-        if (slen_err) return RespParseResult::ERROR;
-        if (slen < 0) { *consumed = 0; return RespParseResult::INCOMPLETE; }
+        ParseIntResult slen_parse = parse_int(data, len, &pos);
+        if (slen_parse.status == ParseIntStatus::INCOMPLETE) {
+            *consumed = 0;
+            return RespParseResult::INCOMPLETE;
+        }
+        if (slen_parse.status == ParseIntStatus::ERROR) return RespParseResult::ERROR;
+        int slen = slen_parse.value;
+        if (slen < 0) return RespParseResult::ERROR;
 
         // Check that the full payload + trailing \r\n is present.
-        if (pos + static_cast<uint32_t>(slen) + 2 > len) { *consumed = 0; return RespParseResult::INCOMPLETE; }
+        uint32_t slen_u32 = static_cast<uint32_t>(slen);
+        if (pos + slen_u32 + 2 > len) {
+            *consumed = 0;
+            return RespParseResult::INCOMPLETE;
+        }
+        if (data[pos + slen_u32] != '\r' || data[pos + slen_u32 + 1] != '\n')
+            return RespParseResult::ERROR;
 
         // Point directly into the receive buffer — zero-copy.
         cmd->args[i].data = data + pos;
-        cmd->args[i].len = static_cast<uint32_t>(slen);
-        pos += static_cast<uint32_t>(slen) + 2; // skip <bytes> + \r\n
+        cmd->args[i].len = slen_u32;
+        pos += slen_u32 + 2; // skip <bytes> + \r\n
     }
 
     *consumed = pos;

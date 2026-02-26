@@ -25,7 +25,14 @@ struct Connection {
     uint32_t tx_bytes_queued;       // total queued bytes (backpressure meter)
 };
 
+// Test hook: fail the next N connection_create() calls when > 0.
+inline int g_connection_create_fail_count = 0;
+
 inline Connection *connection_create(int fd) {
+    if (g_connection_create_fail_count > 0) {
+        g_connection_create_fail_count--;
+        return nullptr;
+    }
     auto *conn = static_cast<Connection *>(std::calloc(1, sizeof(Connection)));
     if (conn) conn->fd = fd;
     return conn;

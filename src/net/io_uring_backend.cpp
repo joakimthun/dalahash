@@ -460,6 +460,17 @@ static int uring_wait(IoBackend *ctx, IoCompletion *out, int max_completions) {
         c->more = (cqe->flags & IORING_CQE_F_MORE) != 0;
 
         if (cqe->res < 0) {
+                        //  ACCEPT failures carry listen fd in user_data and must
+            // stay on ACCEPT path so worker can safely rearm accept without
+            // touching unrelated connection slots.
+            if (kind == IoCompletion::ACCEPT) {
+                c->kind = IoCompletion::ACCEPT;
+                c->more = false;
+                out_count++;
+                total_seen++;
+                continue;
+            }
+
                         //  -ENOBUFS on RECV: provided buffer pool exhausted. Not a real
             // error — the recv should be rearmed once buffers are recycled.
             // Surface as RECV with null buf so handle_recv can rearm.

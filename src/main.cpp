@@ -11,7 +11,13 @@ int main(int argc, char **argv) {
 
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
-            config.port = static_cast<uint16_t>(std::atoi(argv[++i]));
+            char *end = nullptr;
+            unsigned long parsed = std::strtoul(argv[++i], &end, 10);
+            if (!end || *end != '\0' || parsed == 0 || parsed > 65535ul) {
+                std::fprintf(stderr, "Invalid --port value\n");
+                return 1;
+            }
+            config.port = static_cast<uint16_t>(parsed);
         } else if (std::strcmp(argv[i], "--workers") == 0 && i + 1 < argc) {
             config.num_workers = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--store-bytes") == 0 && i + 1 < argc) {

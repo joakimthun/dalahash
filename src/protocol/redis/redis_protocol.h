@@ -51,6 +51,10 @@ inline void protocol_worker_quiescent(ProtocolWorkerState *state) {
     store_quiescent(&state->store);
 }
 
+inline uint64_t protocol_now_ms() {
+    return kv_time_now_ms();
+}
+
 // Parse one RESP command from [data, data + len).
 // Contract delegated to resp_parse:
 //   - OK: cmd populated, consumed > 0
@@ -67,6 +71,7 @@ inline ProtocolParseResult protocol_parse(const uint8_t *data, uint32_t len,
 // overflow and closes the connection.
 inline uint32_t protocol_execute(const ProtocolCommand *cmd,
                                  ProtocolWorkerState *state,
+                                 uint64_t now_ms,
                                  uint8_t *out_buf, uint32_t out_buf_size) {
-    return command_execute(cmd, &state->store, out_buf, out_buf_size);
+    return command_execute(cmd, &state->store, now_ms, out_buf, out_buf_size);
 }

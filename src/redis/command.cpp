@@ -33,7 +33,7 @@ static uint32_t write_error_bounded(uint8_t *out, uint32_t out_buf_size, const c
 // receive buffer (zero-copy from the parser), so key/value byte ranges are
 // available without any additional allocation until this function returns.
 uint32_t command_execute(const RespCommand *cmd, Store *store,
-                         uint8_t *out_buf, uint32_t out_buf_size) {
+                         uint64_t now_ms, uint8_t *out_buf, uint32_t out_buf_size) {
     if (cmd->argc < 1) return write_error_bounded(out_buf, out_buf_size, "empty command");
 
     const RespArg *verb = &cmd->args[0];
@@ -44,7 +44,7 @@ uint32_t command_execute(const RespCommand *cmd, Store *store,
         // args[1] points into the receive buffer — construct string_view without copy.
         std::string_view key(reinterpret_cast<const char *>(cmd->args[1].data), cmd->args[1].len);
         StoreValueView val = {};
-        if (!store_get(store, key, &val)) {
+        if (!store_get_at(store, key, now_ms, &val)) {
             if (out_buf_size < 5) return write_error_bounded(out_buf, out_buf_size, "output buffer too small");
             return resp_write_null(out_buf);
         }
@@ -61,7 +61,7 @@ uint32_t command_execute(const RespCommand *cmd, Store *store,
         // args[1] and args[2] point into receive buffer; store_set copies bytes.
         std::string_view key(reinterpret_cast<const char *>(cmd->args[1].data), cmd->args[1].len);
         std::string_view value(reinterpret_cast<const char *>(cmd->args[2].data), cmd->args[2].len);
-        StoreSetStatus set_status = store_set(store, key, value);
+        StoreSetStatus set_status = store_set_at(store, key, value, now_ms);
         if (set_status == StoreSetStatus::OOM)
             return write_error_bounded(out_buf, out_buf_size, "out of memory");
         if (set_status != StoreSetStatus::OK)

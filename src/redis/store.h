@@ -98,23 +98,43 @@ inline void store_quiescent(Store *s) {
     kv_store_quiescent(s->kv, s->worker_id);
 }
 
-inline bool store_get(Store *s, std::string_view key, StoreValueView *out) {
+inline bool store_get_at(Store *s, std::string_view key, uint64_t now_ms, StoreValueView *out) {
     if (!out) return false;
     out->data = nullptr;
     out->len = 0;
     if (!store_ensure_local(s)) return false;
 
     KvValueView view = {};
-    KvGetStatus st = kv_store_get(s->kv, s->worker_id, key, kv_time_now_ms(), &view);
+    KvGetStatus st = kv_store_get(s->kv, s->worker_id, key, now_ms, &view);
     if (st != KvGetStatus::HIT) return false;
     out->data = view.data;
     out->len = view.len;
     return true;
 }
 
-inline StoreSetStatus store_set(Store *s, std::string_view key, std::string_view value) {
+inline bool store_get(Store *s, std::string_view key, StoreValueView *out) {
+    return store_get_at(s, key, kv_time_now_ms(), out);
+}
+
+inline StoreSetStatus store_set_at(Store *s, std::string_view key, std::string_view value,
+                                   uint64_t now_ms) {
     if (!store_ensure_local(s)) return StoreSetStatus::INVALID;
-    KvSetStatus st = kv_store_set(s->kv, s->worker_id, key, value, kv_time_now_ms(), nullptr);
+    KvSetStatus st = kv_store_set(s->kv, s->worker_id, key, value, now_ms, nullptr);
+    if (st == KvSetStatus::OK) return StoreSetStatus::OK;
+    if (st == KvSetStatus::OOM) return StoreSetStatus::OOM;
+    return StoreSetStatus::INVALID;
+}
+
+inline StoreSetStatus store_set(Store *s, std::string_view key, std::string_view value) {
+    return store_set_at(s, key, value, kv_time_now_ms());
+}
+
+inline StoreSetStatus store_set_expire_after_ms_at(Store *s, std::string_view key,
+                                                   std::string_view value, uint64_t ttl_ms,
+                                                   uint64_t now_ms) {
+    if (!store_ensure_local(s)) return StoreSetStatus::INVALID;
+    KvSetOptions opts = {.mode = KvExpireMode::AFTER_MS, .value_ms = ttl_ms};
+    KvSetStatus st = kv_store_set(s->kv, s->worker_id, key, value, now_ms, &opts);
     if (st == KvSetStatus::OK) return StoreSetStatus::OK;
     if (st == KvSetStatus::OOM) return StoreSetStatus::OOM;
     return StoreSetStatus::INVALID;
@@ -122,9 +142,15 @@ inline StoreSetStatus store_set(Store *s, std::string_view key, std::string_view
 
 inline StoreSetStatus store_set_expire_after_ms(Store *s, std::string_view key,
                                                 std::string_view value, uint64_t ttl_ms) {
+    return store_set_expire_after_ms_at(s, key, value, ttl_ms, kv_time_now_ms());
+}
+
+inline StoreSetStatus store_set_expire_at_ms_at(Store *s, std::string_view key,
+                                                std::string_view value, uint64_t at_ms,
+                                                uint64_t now_ms) {
     if (!store_ensure_local(s)) return StoreSetStatus::INVALID;
-    KvSetOptions opts = {.mode = KvExpireMode::AFTER_MS, .value_ms = ttl_ms};
-    KvSetStatus st = kv_store_set(s->kv, s->worker_id, key, value, kv_time_now_ms(), &opts);
+    KvSetOptions opts = {.mode = KvExpireMode::AT_MS, .value_ms = at_ms};
+    KvSetStatus st = kv_store_set(s->kv, s->worker_id, key, value, now_ms, &opts);
     if (st == KvSetStatus::OK) return StoreSetStatus::OK;
     if (st == KvSetStatus::OOM) return StoreSetStatus::OOM;
     return StoreSetStatus::INVALID;
@@ -132,10 +158,5 @@ inline StoreSetStatus store_set_expire_after_ms(Store *s, std::string_view key,
 
 inline StoreSetStatus store_set_expire_at_ms(Store *s, std::string_view key,
                                              std::string_view value, uint64_t at_ms) {
-    if (!store_ensure_local(s)) return StoreSetStatus::INVALID;
-    KvSetOptions opts = {.mode = KvExpireMode::AT_MS, .value_ms = at_ms};
-    KvSetStatus st = kv_store_set(s->kv, s->worker_id, key, value, kv_time_now_ms(), &opts);
-    if (st == KvSetStatus::OK) return StoreSetStatus::OK;
-    if (st == KvSetStatus::OOM) return StoreSetStatus::OOM;
-    return StoreSetStatus::INVALID;
+    return store_set_expire_at_ms_at(s, key, value, at_ms, kv_time_now_ms());
 }

@@ -42,6 +42,10 @@ inline void protocol_worker_init(ProtocolWorkerState *,
 
 inline void protocol_worker_quiescent(ProtocolWorkerState *) {}
 
+inline uint64_t protocol_now_ms() {
+    return 0;
+}
+
 // Parse one echo command from [data, data + len).
 //
 // Behavior:
@@ -71,6 +75,7 @@ inline ProtocolParseResult protocol_parse(const uint8_t *data, uint32_t len,
 //     the connection.
 inline uint32_t protocol_execute(const ProtocolCommand *cmd,
                                  ProtocolWorkerState *,
+                                 uint64_t,
                                  uint8_t *out_buf, uint32_t out_buf_size) {
     if (!cmd) return 0;
     if (cmd->len > out_buf_size) return out_buf_size + 1;

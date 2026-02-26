@@ -28,6 +28,7 @@ struct SimIoBackend {
     std::vector<int> recv_armed;
     std::vector<int> closed_fds;
     bool accept_armed = false;
+    int submit_accept_call_count = 0;
     std::vector<std::vector<uint8_t>> buffers;      // holds recv data allocations
     bool inject_eintr = false;
     bool auto_stop = true;
@@ -54,6 +55,7 @@ static int sim_init(IoBackend *) { return 0; }
 
 static int sim_submit_accept(IoBackend *ctx, int) {
     auto *be = reinterpret_cast<SimIoBackend *>(ctx);
+    be->submit_accept_call_count++;
     if (be->submit_accept_fail_count > 0) { be->submit_accept_fail_count--; return -ENOSPC; }
     be->accept_armed = true;
     return 0;

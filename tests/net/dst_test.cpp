@@ -39,7 +39,8 @@ static std::string process_recv(Connection *conn, const uint8_t *data, uint32_t 
         uint32_t consumed = 0;
         auto result = protocol_parse(parse_buf + offset, parse_len - offset, &cmd, &consumed);
         if (result == PROTOCOL_PARSE_OK) {
-            uint32_t n = protocol_execute(&cmd, protocol_state, response_buf, sizeof(response_buf));
+            uint32_t n = protocol_execute(&cmd, protocol_state, protocol_now_ms(),
+                                          response_buf, sizeof(response_buf));
             response.append(reinterpret_cast<char *>(response_buf), n);
             offset += consumed;
         } else if (result == PROTOCOL_PARSE_INCOMPLETE) {
@@ -195,7 +196,8 @@ TEST(DST, DeepPipelineCoalesced) {
         auto result = protocol_parse(parse_buf + offset, parse_len - offset, &cmd, &consumed);
         if (result == PROTOCOL_PARSE_OK) {
             uint32_t cap = 65536 - resp_offset;
-            uint32_t resp_len = protocol_execute(&cmd, &protocol_state, response + resp_offset, cap);
+            uint32_t resp_len = protocol_execute(&cmd, &protocol_state, protocol_now_ms(),
+                                                 response + resp_offset, cap);
             resp_offset += resp_len;
             offset += consumed;
         } else {
@@ -417,6 +419,67 @@ TEST(DSTIntegration, AcceptInitialArmFailureRetries) {
 
     worker_run(&config);
     EXPECT_TRUE(sim.accept_armed);
+}
+
+TEST(DSTIntegration, AcceptErrorTriggersAcceptRearm) {
+    IoCompletion accept_error = {};
+    accept_error.kind = IoCompletion::ACCEPT;
+    accept_error.fd = 0;
+    accept_error.result = -EIO;
+    accept_error.buf = nullptr;
+    accept_error.buf_len = 0;
+    accept_error.buf_id = 0;
+    accept_error.more = false;
+
+    std::vector<IoCompletion> events;
+    events.push_back(accept_error);
+
+    SimIoBackend result = run_worker_sim(events);
+    EXPECT_GE(result.submit_accept_call_count, 2);
+}
+
+TEST(DSTIntegration, AcceptErrorDoesNotCloseConnectionAtListenFdIndex) {
+    SimIoBackend sim_setup;
+    std::string ping = "*1\r\n$4\r\nPING\r\n";
+
+    IoCompletion accept_error = {};
+    accept_error.kind = IoCompletion::ACCEPT;
+    accept_error.fd = 0;         // listen fd in skip_setup mode
+    accept_error.result = -EIO;  // accept failure
+    accept_error.buf = nullptr;
+    accept_error.buf_len = 0;
+    accept_error.buf_id = 0;
+    accept_error.more = false;
+
+    std::vector<IoCompletion> events;
+    events.push_back(sim_accept(0));
+    events.push_back(accept_error);
+    events.push_back(sim_recv(&sim_setup, 0, ping.data(), static_cast<uint32_t>(ping.size())));
+
+    SimIoBackend result = run_worker_sim(events);
+    EXPECT_EQ(result.sent_data[0], "+PONG\r\n");
+    for (int fd : result.closed_fds) {
+        EXPECT_NE(fd, 0);
+    }
+}
+
+TEST(DSTIntegration, AcceptAllocFailureClosesAcceptedFd) {
+    g_connection_create_fail_count = 1;
+
+    std::vector<IoCompletion> events;
+    events.push_back(sim_accept(10));
+
+    SimIoBackend result = run_worker_sim(events);
+    g_connection_create_fail_count = 0;
+
+    bool was_closed = false;
+    for (int fd : result.closed_fds) {
+        if (fd == 10) {
+            was_closed = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(was_closed);
 }
 
 TEST(DSTIntegration, SendBuffersOwnedAcrossAsyncCompletion) {
@@ -698,6 +761,43 @@ TEST(DSTIntegration, PendingCloseRetrySucceeds) {
     EXPECT_GE(sim.submit_close_call_count, 2);
 }
 
+TEST(DSTIntegration, CloseRetryQueueOverflowStillClosesHighFd) {
+    SimIoBackend sim_setup;
+    std::string bad = "GARBAGE\r\n";
+
+    SimIoBackend sim;
+    static constexpr int kConnCount = 300; // exceeds worker's pending-close queue
+    for (int fd = 0; fd < kConnCount; fd++) {
+        sim.pending.push_back(sim_accept(fd));
+        sim.pending.push_back(sim_recv(&sim_setup, fd, bad.data(),
+                                       static_cast<uint32_t>(bad.size())));
+    }
+    sim.submit_close_fail_count = kConnCount; // first close wave fails with ENOSPC
+    sim.submit_close_fail_errno = -ENOSPC;
+
+    std::atomic<bool> running{true};
+    sim.running = &running;
+
+    WorkerConfig config = {};
+    config.cpu_id = 0;
+    config.ops = sim_io_ops();
+    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.running = &running;
+    config.skip_setup = true;
+    config.listen_fd = 0;
+
+    worker_run(&config);
+
+    bool high_fd_closed = false;
+    for (int fd : sim.closed_fds) {
+        if (fd == kConnCount - 1) {
+            high_fd_closed = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(high_fd_closed);
+}
+
 TEST(DSTIntegration, RecvAfterMultishotTermination) {
     // Multishot recv terminates (more=false), worker should rearm.
     SimIoBackend sim_setup;
@@ -726,6 +826,31 @@ TEST(DSTIntegration, RecvAfterMultishotTermination) {
         if (fd == 10) { rearmed = true; break; }
     }
     EXPECT_TRUE(rearmed);
+}
+
+TEST(DSTIntegration, NoCommandExecutionWhenClosing) {
+    SimIoBackend sim_setup;
+    std::string bad = "GARBAGE\r\n";
+    std::string ping = "*1\r\n$4\r\nPING\r\n";
+
+    std::vector<IoCompletion> events;
+    events.push_back(sim_accept(10));
+    events.push_back(sim_recv(&sim_setup, 10, bad.data(), static_cast<uint32_t>(bad.size())));
+    events.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
+
+    SimIoBackend result = run_worker_sim(events);
+
+    auto it = result.sent_data.find(10);
+    EXPECT_TRUE(it == result.sent_data.end() || it->second.empty());
+
+    bool was_closed = false;
+    for (int fd : result.closed_fds) {
+        if (fd == 10) {
+            was_closed = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(was_closed);
 }
 
 TEST(DSTIntegration, SendResultZeroClosesConnection) {

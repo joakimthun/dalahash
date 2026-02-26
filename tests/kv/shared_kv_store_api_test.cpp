@@ -188,7 +188,7 @@ TEST(SharedKvApi, GetMissResetsOutputView) {
     kv_store_destroy(s);
 }
 
-TEST(SharedKvApi, InRangeUnregisteredWorkerCanReadAndWrite) {
+TEST(SharedKvApi, UnregisteredWorkerRejected) {
     KvStoreConfig cfg = {
         .capacity_bytes = 1ull << 20,
         .shard_count = 8,
@@ -199,16 +199,16 @@ TEST(SharedKvApi, InRangeUnregisteredWorkerCanReadAndWrite) {
     ASSERT_NE(s, nullptr);
     ASSERT_EQ(kv_store_register_worker(s, 0), 0);
 
-    // worker 1 has not been registered yet, but API still permits access.
-    EXPECT_EQ(kv_store_set(s, 1, "k", "v1", 10, nullptr), KvSetStatus::OK);
+    // worker 1 is in range but unregistered; strict API rejects access.
+    EXPECT_EQ(kv_store_set(s, 1, "k", "v1", 10, nullptr), KvSetStatus::INVALID);
     KvValueView out = {};
-    EXPECT_EQ(kv_store_get(s, 1, "k", 10, &out), KvGetStatus::HIT);
-    EXPECT_EQ(kvtest::view_to_string(out), "v1");
+    EXPECT_EQ(kv_store_get(s, 1, "k", 10, &out), KvGetStatus::MISS);
+    EXPECT_EQ(kv_store_get(s, 0, "k", 10, &out), KvGetStatus::MISS);
 
     kv_store_destroy(s);
 }
 
-TEST(SharedKvApi, OutOfRangeWorkerIdsFallbackAndRemainUsable) {
+TEST(SharedKvApi, OutOfRangeWorkerIdsRejected) {
     KvStoreConfig cfg = {
         .capacity_bytes = 1ull << 20,
         .shard_count = 8,
@@ -219,9 +219,11 @@ TEST(SharedKvApi, OutOfRangeWorkerIdsFallbackAndRemainUsable) {
     ASSERT_NE(s, nullptr);
     ASSERT_EQ(kv_store_register_worker(s, 0), 0);
 
-    EXPECT_EQ(kv_store_set(s, 99, "k", "v", 10, nullptr), KvSetStatus::OK);
+    EXPECT_EQ(kv_store_set(s, 99, "k", "v", 10, nullptr), KvSetStatus::INVALID);
     KvValueView out = {};
-    EXPECT_EQ(kv_store_get(s, 777, "k", 10, &out), KvGetStatus::HIT);
+    EXPECT_EQ(kv_store_get(s, 777, "k", 10, &out), KvGetStatus::MISS);
+    EXPECT_EQ(kv_store_set(s, 0, "k", "v", 10, nullptr), KvSetStatus::OK);
+    EXPECT_EQ(kv_store_get(s, 0, "k", 10, &out), KvGetStatus::HIT);
     EXPECT_EQ(kvtest::view_to_string(out), "v");
 
     kv_store_destroy(s);

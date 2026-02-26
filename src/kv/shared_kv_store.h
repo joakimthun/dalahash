@@ -8,6 +8,7 @@
 // Threading model:
 //   - One KvStore is intended to be shared by many worker threads.
 //   - Concurrent GET/SET are supported without external locks.
+//   - Each calling thread must use a stable, registered worker_id.
 //   - Deferred memory reclamation requires periodic kv_store_quiescent() calls
 //     from participating workers.
 struct KvStore;
@@ -89,6 +90,10 @@ void kv_store_destroy(KvStore *store);
 //   - Safe to call concurrently for different worker ids.
 //   - Re-registering the same worker id is allowed.
 //
+// Contract:
+//   - worker_id must be registered before using kv_store_get/kv_store_set/
+//     kv_store_quiescent from that worker.
+//
 // Returns 0 on success, -EINVAL on invalid input/range.
 int kv_store_register_worker(KvStore *store, uint32_t worker_id);
 
@@ -106,14 +111,19 @@ void kv_store_quiescent(KvStore *store, uint32_t worker_id);
 //
 // Parameters:
 //   - worker_id: worker index used for touch sampling and retirement ownership.
+//                Must be registered via kv_store_register_worker.
 //   - now_ms: caller-provided current time in milliseconds (used for expiration).
 //   - out: output view populated on HIT and zeroed on MISS.
 //
 // Thread-safety:
-//   - Safe for concurrent calls from many threads.
+//   - Safe for concurrent calls from many threads when each thread uses a
+//     stable registered worker_id.
 //
 // Expiration behavior:
 //   - Lazy: expired keys are removed on access path when encountered.
+//
+// Invalid worker_id behavior:
+//   - Out-of-range or unregistered worker ids return MISS.
 KvGetStatus kv_store_get(KvStore *store, uint32_t worker_id, std::string_view key,
                          uint64_t now_ms, KvValueView *out);
 
@@ -121,15 +131,18 @@ KvGetStatus kv_store_get(KvStore *store, uint32_t worker_id, std::string_view ke
 //
 // Parameters:
 //   - worker_id: worker index used for retirement ownership and trim cursor.
+//                Must be registered via kv_store_register_worker.
 //   - now_ms: caller-provided current time in milliseconds (used for expiration).
 //   - opts: optional expiration options; nullptr means no expiration.
 //
 // Thread-safety:
-//   - Safe for concurrent calls from many threads.
+//   - Safe for concurrent calls from many threads when each thread uses a
+//     stable registered worker_id.
 //
 // Capacity behavior:
 //   - Store attempts to trim via approximate LRU-style eviction when over target.
 //   - OOM means write could not be admitted under current conditions.
+//   - INVALID is returned for out-of-range or unregistered worker ids.
 KvSetStatus kv_store_set(KvStore *store, uint32_t worker_id, std::string_view key,
                          std::string_view value, uint64_t now_ms,
                          const KvSetOptions *opts);

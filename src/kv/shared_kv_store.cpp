@@ -194,11 +194,19 @@ static uint64_t compute_expire_at(uint64_t now_ms, const KvSetOptions *opts) {
     return 0;
 }
 
-// Resolve worker state for per-worker counters/reclamation ownership.
-static WorkerState *worker_state(KvStore *store, uint32_t worker_id) {
+// Resolve worker state for worker-id range checks.
+static WorkerState *worker_state_in_range(KvStore *store, uint32_t worker_id) {
     if (!store || store->worker_count == 0) return nullptr;
     if (worker_id >= store->worker_count) return nullptr;
     return &store->workers[worker_id];
+}
+
+// Resolve worker state only for registered worker ids.
+static WorkerState *worker_state_registered(KvStore *store, uint32_t worker_id) {
+    WorkerState *ws = worker_state_in_range(store, worker_id);
+    if (!ws) return nullptr;
+    if (!ws->registered.load(std::memory_order_acquire)) return nullptr;
+    return ws;
 }
 
 // Select smallest class that can hold size; -1 => large path.
@@ -342,8 +350,8 @@ static void node_free(KvStore *store, Node *node) {
 
 static void retire_node(KvStore *store, uint32_t worker_id, Node *node) {
     if (!store || !node) return;
-    WorkerState *ws = worker_state(store, worker_id);
-    if (!ws) ws = &store->workers[0];
+    WorkerState *ws = worker_state_registered(store, worker_id);
+    if (!ws) return;
     // Monotonic sequence gives a global ordering for deferred reclamation.
     uint64_t seq = store->global_seq.fetch_add(1, std::memory_order_acq_rel) + 1;
     node->retire_seq = seq;
@@ -394,8 +402,9 @@ static bool trim_to_capacity(KvStore *store, uint32_t worker_id, uint64_t now_ms
     uint64_t live = store->live_bytes.load(std::memory_order_acquire);
     if (live <= store->capacity_bytes) return true;
 
-    WorkerState *ws = worker_state(store, worker_id);
-    uint32_t cursor = ws ? ws->shard_cursor : 0;
+    WorkerState *ws = worker_state_registered(store, worker_id);
+    if (!ws) return false;
+    uint32_t cursor = ws->shard_cursor;
 
     // Best-effort convergence loop; bounded to avoid pathological long stalls.
     uint32_t rounds = 0;
@@ -415,7 +424,7 @@ static bool trim_to_capacity(KvStore *store, uint32_t worker_id, uint64_t now_ms
         if (rounds > store->shard_count * 8u) break;
     }
 
-    if (ws) ws->shard_cursor = cursor;
+    ws->shard_cursor = cursor;
     return live <= store->capacity_bytes;
 }
 
@@ -572,7 +581,8 @@ void kv_store_destroy(KvStore *store) {
 int kv_store_register_worker(KvStore *store, uint32_t worker_id) {
     if (!store) return -EINVAL;
     if (worker_id >= store->worker_count) return -EINVAL;
-    WorkerState *ws = &store->workers[worker_id];
+    WorkerState *ws = worker_state_in_range(store, worker_id);
+    if (!ws) return -EINVAL;
     // Publish registration and current observed sequence frontier.
     ws->registered.store(1, std::memory_order_release);
     ws->quiescent_seq.store(store->global_seq.load(std::memory_order_acquire),
@@ -582,12 +592,11 @@ int kv_store_register_worker(KvStore *store, uint32_t worker_id) {
 
 void kv_store_quiescent(KvStore *store, uint32_t worker_id) {
     if (!store) return;
-    WorkerState *ws = worker_state(store, worker_id);
+    WorkerState *ws = worker_state_registered(store, worker_id);
     if (!ws) return;
 
     // Publish quiescent checkpoint for this worker.
     uint64_t cur = store->global_seq.load(std::memory_order_acquire);
-    ws->registered.store(1, std::memory_order_release);
     ws->quiescent_seq.store(cur, std::memory_order_release);
 
     // Reclamation can only free nodes retired at or before the slowest worker.
@@ -621,6 +630,8 @@ KvGetStatus kv_store_get(KvStore *store, uint32_t worker_id, std::string_view ke
 
     out->data = nullptr;
     out->len = 0;
+    WorkerState *ws = worker_state_registered(store, worker_id);
+    if (!ws) return KvGetStatus::MISS;
 
     uint64_t hash = hash_bytes(key);
     uint32_t shard_idx = select_shard(hash, store->shard_mask);
@@ -651,15 +662,10 @@ KvGetStatus kv_store_get(KvStore *store, uint32_t worker_id, std::string_view ke
                 return KvGetStatus::MISS;
             }
 
-            WorkerState *ws = worker_state(store, worker_id);
-            if (ws) {
-                ws->touch_counter++;
-                // Sampled refbit write lowers write-amplification on hot reads.
-                if ((ws->touch_counter & KV_TOUCH_SAMPLE_MASK) == 0)
-                    node->refbit.store(1, std::memory_order_relaxed);
-            } else {
+            ws->touch_counter++;
+            // Sampled refbit write lowers write-amplification on hot reads.
+            if ((ws->touch_counter & KV_TOUCH_SAMPLE_MASK) == 0)
                 node->refbit.store(1, std::memory_order_relaxed);
-            }
 
             out->data = node_value_ptr(node);
             out->len = node->value_len;
@@ -674,6 +680,7 @@ KvSetStatus kv_store_set(KvStore *store, uint32_t worker_id, std::string_view ke
                          std::string_view value, uint64_t now_ms,
                          const KvSetOptions *opts) {
     if (!store) return KvSetStatus::INVALID;
+    if (!worker_state_registered(store, worker_id)) return KvSetStatus::INVALID;
 
     uint64_t hash = hash_bytes(key);
     uint64_t expire_at = compute_expire_at(now_ms, opts);

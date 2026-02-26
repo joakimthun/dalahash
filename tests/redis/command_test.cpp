@@ -23,7 +23,7 @@ static RespCommand make_cmd(std::initializer_list<const char *> args) {
 
 static std::string exec(const RespCommand &cmd, Store *store) {
     uint8_t buf[4096];
-    uint32_t n = command_execute(&cmd, store, buf, sizeof(buf));
+    uint32_t n = command_execute(&cmd, store, 12345, buf, sizeof(buf));
     return std::string(reinterpret_cast<char *>(buf), n);
 }
 
@@ -145,7 +145,7 @@ TEST(Command, BinaryKeyValue) {
     set_cmd.argc = 3;
 
     uint8_t buf[4096];
-    uint32_t n = command_execute(&set_cmd, &store, buf, sizeof(buf));
+    uint32_t n = command_execute(&set_cmd, &store, 12345, buf, sizeof(buf));
     EXPECT_EQ(std::string(reinterpret_cast<char *>(buf), n), "+OK\r\n");
 
     // GET with same binary key.
@@ -157,7 +157,7 @@ TEST(Command, BinaryKeyValue) {
     get_cmd.args[1].len = 3;
     get_cmd.argc = 2;
 
-    n = command_execute(&get_cmd, &store, buf, sizeof(buf));
+    n = command_execute(&get_cmd, &store, 12345, buf, sizeof(buf));
     std::string result(reinterpret_cast<char *>(buf), n);
     EXPECT_TRUE(result.starts_with("$4\r\n"));
 }
@@ -202,7 +202,7 @@ TEST(Command, CommandWithArgs) {
 
 static std::string exec_sized(const RespCommand &cmd, Store *store, uint32_t buf_size) {
     std::vector<uint8_t> buf(buf_size);
-    uint32_t n = command_execute(&cmd, store, buf.data(), buf_size);
+    uint32_t n = command_execute(&cmd, store, 12345, buf.data(), buf_size);
     return std::string(reinterpret_cast<char *>(buf.data()), n);
 }
 

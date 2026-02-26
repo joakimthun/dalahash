@@ -41,6 +41,9 @@
 //    - inline void protocol_worker_quiescent(ProtocolWorkerState *state)
 //      Called from worker loop quiescent points.
 //
+//    - inline uint64_t protocol_now_ms()
+//      Return current protocol clock value used by protocol_execute.
+//
 //    - inline ProtocolParseResult protocol_parse(const uint8_t *data,
 //                                                uint32_t len,
 //                                                ProtocolCommand *cmd,
@@ -48,6 +51,7 @@
 //
 //    - inline uint32_t protocol_execute(const ProtocolCommand *cmd,
 //                                       ProtocolWorkerState *state,
+//                                       uint64_t now_ms,
 //                                       uint8_t *out_buf,
 //                                       uint32_t out_buf_size)
 //
@@ -102,4 +106,3 @@ struct ProtocolInitContext {
 #else
 #error "No protocol selected. Set DALAHASH_PROTOCOL (redis/echo) in CMake."
 #endif
-

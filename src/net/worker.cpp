@@ -80,7 +80,20 @@ struct WorkerState {
     bool accept_needs_rearm;
     int pending_close_fds[MAX_PENDING_CLOSE];
     int pending_close_count;
+    int pending_orphan_close_fds[MAX_PENDING_CLOSE];
+    int pending_orphan_close_count;
+    bool close_retry_overflow;
 };
+
+static bool enqueue_pending_fd(int *fds, int *count, int fd) {
+    for (int i = 0; i < *count; i++) {
+        if (fds[i] == fd) return true;
+    }
+    if (*count >= MAX_PENDING_CLOSE) return false;
+    fds[*count] = fd;
+    (*count)++;
+    return true;
+}
 
 static inline uint8_t *tx_chunk_data(TxChunk *chunk) {
     return reinterpret_cast<uint8_t *>(chunk + 1);
@@ -255,6 +268,21 @@ static bool tx_enqueue(Connection *conn, TxSlabPool *pool,
     if (conn->tx_bytes_queued >= TX_HIGH_WATERMARK_BYTES) return false;
     if (len > TX_HIGH_WATERMARK_BYTES - conn->tx_bytes_queued) return false;
 
+    // Append into a mutable tail when possible to coalesce tiny responses
+    // without extra intermediate batching buffers.
+    bool tail_mutable = conn->tx_tail &&
+                        (!conn->send_inflight || conn->tx_tail != conn->tx_head);
+    if (tail_mutable) {
+        TxChunk *tail = conn->tx_tail;
+        uint32_t tail_free = tail->cap - tail->len;
+        if (len <= tail_free) {
+            std::memcpy(tx_chunk_data(tail) + tail->len, data, len);
+            tail->len += len;
+            conn->tx_bytes_queued += len;
+            return true;
+        }
+    }
+
     TxChunk *chunk = tx_alloc(pool, len);
     if (!chunk) return false;
 
@@ -380,15 +408,36 @@ static void submit_close_or_defer(int fd, Connection **conns, IoOps *ops,
     }
 
     if (ret == -ENOSPC) {
-        if (!conn->close_in_retry_queue && state->pending_close_count < MAX_PENDING_CLOSE) {
-            state->pending_close_fds[state->pending_close_count++] = fd;
-            conn->close_in_retry_queue = true;
+        if (!conn->close_in_retry_queue) {
+            if (enqueue_pending_fd(state->pending_close_fds, &state->pending_close_count, fd)) {
+                conn->close_in_retry_queue = true;
+            } else {
+                state->close_retry_overflow = true;
+            }
         }
         return;
     }
 
     std::fprintf(stderr, "worker: submit_close(%d) failed: %s\n", fd, std::strerror(-ret));
     destroy_connection(fd, conns, pool);
+}
+
+static void submit_orphan_close_or_defer(int fd, IoOps *ops,
+                                         IoBackend *backend, WorkerState *state) {
+    if (fd < 0 || fd >= MAX_CONNECTIONS) return;
+
+    int ret = ops->submit_close(backend, fd);
+    if (ret == 0) return;
+
+    if (ret == -ENOSPC) {
+        if (!enqueue_pending_fd(state->pending_orphan_close_fds,
+                                &state->pending_orphan_close_count, fd))
+            state->close_retry_overflow = true;
+        return;
+    }
+
+    std::fprintf(stderr, "worker: submit_close(%d) failed for untracked fd: %s\n",
+                 fd, std::strerror(-ret));
 }
 
 //  TX / close state machine (per connection)
@@ -481,6 +530,15 @@ static void recycle_flush(RecycleBatch *batch, IoOps *ops, IoBackend *backend) {
 static void handle_accept(const IoCompletion *comp, Connection **conns,
                           IoOps *ops, IoBackend *backend, int listen_fd,
                           WorkerState *state, TxSlabPool *pool) {
+    if (comp->result < 0) {
+        std::fprintf(stderr, "accept: completion failed: %s\n", std::strerror(-comp->result));
+        if (!comp->more) {
+            if (ops->submit_accept(backend, listen_fd) < 0)
+                state->accept_needs_rearm = true;
+        }
+        return;
+    }
+
     if (!comp->more) {
         if (ops->submit_accept(backend, listen_fd) < 0)
             state->accept_needs_rearm = true;
@@ -501,6 +559,7 @@ static void handle_accept(const IoCompletion *comp, Connection **conns,
     Connection *conn = connection_create(fd);
     if (!conn) {
         std::fprintf(stderr, "accept: alloc failed for fd %d\n", fd);
+        submit_orphan_close_or_defer(fd, ops, backend, state);
         return;
     }
 
@@ -523,6 +582,13 @@ static void handle_recv(const IoCompletion *comp, Connection **conns,
 
     Connection *conn = conns[fd];
 
+    if (conn->closing) {
+        if (!comp->more && !conn->close_submitted && !conn->send_inflight)
+            submit_close_or_defer(fd, conns, ops, backend, state, pool);
+        if (comp->buf) recycle_add(recycle, comp->buf_id);
+        return;
+    }
+
     //  Buffer exhaustion: kernel terminated multishot recv with -ENOBUFS.
     // No data to parse — just rearm recv so it resumes after buffers recycle.
     if (!comp->buf && comp->buf_len == 0) {
@@ -537,9 +603,8 @@ static void handle_recv(const IoCompletion *comp, Connection **conns,
     uint32_t parse_len = 0;
     bool parsing_from_input_buf = false;
     uint32_t offset = 0;
-    uint8_t response_tmp[RESPONSE_BUF_SIZE];   // one command response at a time
-    uint8_t response_batch[RESPONSE_BUF_SIZE]; // coalesced pipeline send
-    uint32_t response_batch_len = 0;
+    uint64_t now_ms = 0;
+    uint8_t response_buf[RESPONSE_BUF_SIZE];
 
     //  Reassembly path: append new bytes directly into conn->input_buf so parser
     // sees one contiguous stream. If it would overflow the bounded buffer,
@@ -559,32 +624,26 @@ static void handle_recv(const IoCompletion *comp, Connection **conns,
         parse_len = comp->buf_len;
     }
 
+    now_ms = protocol_now_ms();
+
     while (offset < parse_len) {
         ProtocolCommand cmd;
         uint32_t consumed = 0;
         ProtocolParseResult result = protocol_parse(parse_buf + offset, parse_len - offset, &cmd, &consumed);
 
         if (result == PROTOCOL_PARSE_OK) {
-            uint32_t resp_len = protocol_execute(&cmd, protocol_state, response_tmp, RESPONSE_BUF_SIZE);
+            uint32_t resp_len = protocol_execute(&cmd, protocol_state, now_ms,
+                                                 response_buf, RESPONSE_BUF_SIZE);
             if (resp_len > RESPONSE_BUF_SIZE) {
                 try_close(fd, conns, ops, backend, state, pool);
                 goto recycle;
             }
 
-                        //  Keep one coalesced response batch per recv completion to reduce
-            // SQE count under pipelines. Flush into TX queue when batch fills.
-            if (response_batch_len > 0 &&
-                resp_len > RESPONSE_BUF_SIZE - response_batch_len) {
-                if (!tx_enqueue(conn, pool, response_batch, response_batch_len)) {
+            if (resp_len > 0) {
+                if (!tx_enqueue(conn, pool, response_buf, resp_len)) {
                     try_close(fd, conns, ops, backend, state, pool);
                     goto recycle;
                 }
-                response_batch_len = 0;
-            }
-
-            if (resp_len > 0) {
-                std::memcpy(response_batch + response_batch_len, response_tmp, resp_len);
-                response_batch_len += resp_len;
             }
 
             offset += consumed;
@@ -613,14 +672,6 @@ static void handle_recv(const IoCompletion *comp, Connection **conns,
 
         try_close(fd, conns, ops, backend, state, pool);
         goto recycle;
-    }
-
-    // Enqueue any remaining coalesced response bytes.
-    if (response_batch_len > 0) {
-        if (!tx_enqueue(conn, pool, response_batch, response_batch_len)) {
-            try_close(fd, conns, ops, backend, state, pool);
-            goto recycle;
-        }
     }
 
     // Kick TX for this connection if idle.
@@ -792,7 +843,11 @@ int worker_run(WorkerConfig *config) {
                 if (close_ret == 0) {
                     conn->close_submitted = true;
                 } else if (close_ret == -ENOSPC) {
-                    wstate.pending_close_fds[remaining++] = fd;
+                    if (remaining < MAX_PENDING_CLOSE) {
+                        wstate.pending_close_fds[remaining++] = fd;
+                    } else {
+                        wstate.close_retry_overflow = true;
+                    }
                     conn->close_in_retry_queue = true;
                 } else {
                     std::fprintf(stderr, "worker: retry submit_close(%d) failed: %s\n",
@@ -801,6 +856,44 @@ int worker_run(WorkerConfig *config) {
                 }
             }
             wstate.pending_close_count = remaining;
+        }
+
+        if (wstate.pending_orphan_close_count > 0) {
+            int remaining = 0;
+            for (int i = 0; i < wstate.pending_orphan_close_count; i++) {
+                int fd = wstate.pending_orphan_close_fds[i];
+                if (fd < 0 || fd >= MAX_CONNECTIONS) continue;
+
+                int close_ret = config->ops.submit_close(config->backend, fd);
+                if (close_ret == 0) {
+                    continue;
+                }
+                if (close_ret == -ENOSPC) {
+                    if (remaining < MAX_PENDING_CLOSE) {
+                        wstate.pending_orphan_close_fds[remaining++] = fd;
+                    } else {
+                        wstate.close_retry_overflow = true;
+                    }
+                    continue;
+                }
+
+                std::fprintf(stderr, "worker: retry submit_close(%d) failed for untracked fd: %s\n",
+                             fd, std::strerror(-close_ret));
+            }
+            wstate.pending_orphan_close_count = remaining;
+        }
+
+        if (wstate.close_retry_overflow) {
+            wstate.close_retry_overflow = false;
+            for (int fd = 0; fd < MAX_CONNECTIONS; fd++) {
+                Connection *conn = conns[fd];
+                if (!conn) continue;
+                if (!conn->closing || conn->close_submitted || conn->close_in_retry_queue ||
+                    conn->send_inflight)
+                    continue;
+                submit_close_or_defer(fd, conns, &config->ops, config->backend,
+                                      &wstate, &tx_pool);
+            }
         }
 
         int n = config->ops.wait(config->backend, completions, MAX_COMPLETIONS);

@@ -411,3 +411,41 @@ TEST(RespParse, SpaceInCount) {
                          static_cast<uint32_t>(input.size()), &cmd, &consumed),
               RespParseResult::ERROR);
 }
+
+TEST(RespParse, NegativeArgcIsError) {
+    std::string input = "*-1\r\n";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::ERROR);
+}
+
+TEST(RespParse, NegativeBulkLenInRequestIsError) {
+    std::string input = "*1\r\n$-1\r\n";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::ERROR);
+}
+
+TEST(RespParse, InvalidCountTerminatorIsError) {
+    // Array count line must end with CRLF.
+    std::string input = "*2\rX$3\r\nGET\r\n$3\r\nfoo\r\n";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::ERROR);
+}
+
+TEST(RespParse, InvalidBulkPayloadTrailerIsError) {
+    // Bulk payload must be followed by CRLF.
+    std::string input = "*1\r\n$3\r\nGETXX";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t *>(input.data()),
+                         static_cast<uint32_t>(input.size()), &cmd, &consumed),
+              RespParseResult::ERROR);
+}
