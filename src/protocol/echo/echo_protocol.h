@@ -12,6 +12,7 @@
 
 #pragma once
 
+#include "base/assert.h"
 #include <cstdint>
 #include <cstring>
 
@@ -54,6 +55,9 @@ inline uint64_t protocol_now_ms() {
 //   - invalid args (null cmd/consumed or null data with len>0): ERROR.
 inline ProtocolParseResult protocol_parse(const uint8_t *data, uint32_t len,
                                           ProtocolCommand *cmd, uint32_t *consumed) {
+    ASSERT(cmd != nullptr, "echo protocol_parse requires cmd output");
+    ASSERT(consumed != nullptr, "echo protocol_parse requires consumed output");
+    ASSERT(data != nullptr || len == 0, "echo protocol_parse null data with non-zero length");
     if (!cmd || !consumed) return PROTOCOL_PARSE_ERROR;
     if (!data && len > 0) return PROTOCOL_PARSE_ERROR;
     if (len == 0) {
@@ -77,6 +81,9 @@ inline uint32_t protocol_execute(const ProtocolCommand *cmd,
                                  ProtocolWorkerState *,
                                  uint64_t,
                                  uint8_t *out_buf, uint32_t out_buf_size) {
+    ASSERT(cmd != nullptr, "echo protocol_execute requires command");
+    ASSERT(out_buf != nullptr || out_buf_size == 0,
+           "echo protocol_execute null output with non-zero size");
     if (!cmd) return 0;
     if (cmd->len > out_buf_size) return out_buf_size + 1;
     if (cmd->len > 0) std::memcpy(out_buf, cmd->data, cmd->len);

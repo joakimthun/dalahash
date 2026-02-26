@@ -1,4 +1,6 @@
 build/
+build-release/
+build_release/
 build-echo/
 build_echo/
 build-redis/

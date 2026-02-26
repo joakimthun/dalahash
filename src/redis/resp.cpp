@@ -1,6 +1,7 @@
 // resp.cpp — RESP2 parser and response writer implementation.
 
 #include "resp.h"
+#include "base/assert.h"
 
 #include <climits>
 #include <cstdio>
@@ -24,6 +25,9 @@ struct ParseIntResult {
 // Returns ParseIntStatus::OK with parsed value on success, INCOMPLETE if the
 // full line has not arrived, or ERROR on malformed input.
 static ParseIntResult parse_int(const uint8_t *buf, uint32_t len, uint32_t *pos) {
+    ASSERT(buf != nullptr || len == 0, "parse_int null buffer with non-zero length");
+    ASSERT(pos != nullptr, "parse_int requires position pointer");
+    ASSERT(*pos <= len, "parse_int position out of bounds");
     int n = 0;
     bool negative = false;
     bool has_digits = false;
@@ -86,6 +90,12 @@ static ParseIntResult parse_int(const uint8_t *buf, uint32_t len, uint32_t *pos)
 // On success, *consumed covers the entire command including all \r\n pairs.
 RespParseResult resp_parse(const uint8_t *data, uint32_t len,
                            RespCommand *cmd, uint32_t *consumed) {
+    ASSERT(cmd != nullptr, "resp_parse requires cmd output");
+    ASSERT(consumed != nullptr, "resp_parse requires consumed output");
+    ASSERT(data != nullptr || len == 0, "resp_parse null data with non-zero length");
+    if (!cmd || !consumed) return RespParseResult::ERROR;
+    if (!data && len > 0) return RespParseResult::ERROR;
+
     uint32_t pos = 0;
 
     // Empty buffer — wait for data.
@@ -140,17 +150,21 @@ RespParseResult resp_parse(const uint8_t *data, uint32_t len,
     }
 
     *consumed = pos;
+    ASSERT(*consumed > 0, "resp_parse OK must consume bytes");
+    ASSERT(*consumed <= len, "resp_parse consumed beyond input length");
     return RespParseResult::OK;
 }
 
 // Emit "+OK\r\n" — RESP simple string, used as the SET reply.
 uint32_t resp_write_ok(uint8_t *out) {
+    ASSERT(out != nullptr, "resp_write_ok requires output buffer");
     std::memcpy(out, "+OK\r\n", 5);
     return 5;
 }
 
 // Emit "$-1\r\n" — RESP null bulk string, used when a key is not found.
 uint32_t resp_write_null(uint8_t *out) {
+    ASSERT(out != nullptr, "resp_write_null requires output buffer");
     std::memcpy(out, "$-1\r\n", 5);
     return 5;
 }
@@ -158,6 +172,8 @@ uint32_t resp_write_null(uint8_t *out) {
 //  Emit a RESP bulk string: "$<len>\r\n<data>\r\n".
 // Used for GET responses. data[] is copied into out[]; no pointer aliasing.
 uint32_t resp_write_bulk(uint8_t *out, const uint8_t *data, uint32_t len) {
+    ASSERT(out != nullptr, "resp_write_bulk requires output buffer");
+    ASSERT(data != nullptr || len == 0, "resp_write_bulk null data with non-zero length");
     uint32_t n = 0;
     out[n++] = '$';
     n += static_cast<uint32_t>(std::snprintf(reinterpret_cast<char *>(out) + n, 20, "%u", len));
@@ -170,6 +186,9 @@ uint32_t resp_write_bulk(uint8_t *out, const uint8_t *data, uint32_t len) {
 
 // Emit "-ERR <msg>\r\n" — RESP error, truncated to 512 bytes total.
 uint32_t resp_write_error(uint8_t *out, const char *msg) {
+    ASSERT(out != nullptr, "resp_write_error requires output buffer");
+    ASSERT(msg != nullptr, "resp_write_error requires message");
+    if (!out || !msg) return 0;
     int n = std::snprintf(reinterpret_cast<char *>(out), 512, "-ERR %s\r\n", msg);
     if (n <= 0) return 0;
     return static_cast<uint32_t>(n >= 512 ? 511 : n);
@@ -177,6 +196,7 @@ uint32_t resp_write_error(uint8_t *out, const char *msg) {
 
 // Emit "+PONG\r\n" — RESP simple string reply to PING.
 uint32_t resp_write_pong(uint8_t *out) {
+    ASSERT(out != nullptr, "resp_write_pong requires output buffer");
     std::memcpy(out, "+PONG\r\n", 7);
     return 7;
 }

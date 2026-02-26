@@ -1,6 +1,7 @@
 // worker.cpp — Per-core worker event loop.
 
 #include "worker.h"
+#include "base/assert.h"
 #include "connection.h"
 #include "protocol/protocol.h"
 
@@ -85,7 +86,29 @@ struct WorkerState {
     bool close_retry_overflow;
 };
 
+static void tx_assert_conn_invariants(const Connection *conn) {
+    ASSERT(conn != nullptr, "connection pointer is null");
+    ASSERT((conn->tx_head == nullptr) == (conn->tx_tail == nullptr),
+           "tx_head/tx_tail mismatch");
+    if (!conn->tx_head) {
+        ASSERT(conn->tx_head_sent == 0, "tx_head_sent must be zero when queue empty");
+        ASSERT(conn->tx_bytes_queued == 0, "tx_bytes_queued must be zero when queue empty");
+        ASSERT(!conn->send_inflight, "send_inflight without queued head");
+        return;
+    }
+
+    ASSERT(conn->tx_tail != nullptr, "tx_tail must exist when tx_head exists");
+    ASSERT(conn->tx_head_sent <= conn->tx_head->len, "tx_head_sent out of range");
+    if (conn->send_inflight)
+        ASSERT(conn->tx_head_sent < conn->tx_head->len,
+               "inflight send requires remaining bytes");
+}
+
 static bool enqueue_pending_fd(int *fds, int *count, int fd) {
+    ASSERT(fds != nullptr, "pending fd array is null");
+    ASSERT(count != nullptr, "pending count pointer is null");
+    ASSERT(*count >= 0, "pending count is negative");
+    ASSERT(*count <= MAX_PENDING_CLOSE, "pending count out of range");
     for (int i = 0; i < *count; i++) {
         if (fds[i] == fd) return true;
     }
@@ -96,6 +119,7 @@ static bool enqueue_pending_fd(int *fds, int *count, int fd) {
 }
 
 static inline uint8_t *tx_chunk_data(TxChunk *chunk) {
+    ASSERT(chunk != nullptr, "tx_chunk_data requires non-null chunk");
     return reinterpret_cast<uint8_t *>(chunk + 1);
 }
 
@@ -123,6 +147,8 @@ static int tx_select_class(uint32_t len) {
 // Partial success is valid: if allocator pressure appears mid-batch, we keep
 // what was obtained and continue running instead of failing hard.
 static bool tx_grow_class(TxSlabPool *pool, uint32_t class_idx) {
+    ASSERT(pool != nullptr, "tx_grow_class requires pool");
+    ASSERT(class_idx < TX_CLASS_COUNT, "invalid TX slab class");
     uint32_t cap = TX_CLASS_CAPS[class_idx];
     uint32_t allocated = 0;
     for (uint32_t i = 0; i < TX_POOL_GROW_BATCH; i++) {
@@ -155,6 +181,8 @@ static bool tx_grow_class(TxSlabPool *pool, uint32_t class_idx) {
 //   - LARGE chunks are not tracked in alloc_lists and are freed immediately on
 //     release (they are rare and intentionally bypass slab residency).
 static TxChunk *tx_alloc(TxSlabPool *pool, uint32_t len) {
+    ASSERT(pool != nullptr, "tx_alloc requires pool");
+    ASSERT(len > 0, "tx_alloc called with zero length");
     int class_idx = tx_select_class(len);
     if (class_idx < 0) {
         auto *chunk = static_cast<TxChunk *>(std::malloc(sizeof(TxChunk) + len));
@@ -186,12 +214,14 @@ static TxChunk *tx_alloc(TxSlabPool *pool, uint32_t len) {
 //   freed directly to keep slab footprint bounded and avoid pinning uncommon
 //   huge allocations in resident pool memory.
 static void tx_release_chunk(TxSlabPool *pool, TxChunk *chunk) {
+    ASSERT(pool != nullptr, "tx_release_chunk requires pool");
     if (!chunk) return;
     if (chunk->class_idx == TX_CLASS_LARGE) {
         std::free(chunk);
         return;
     }
     uint32_t class_idx = chunk->class_idx;
+    ASSERT(class_idx < TX_CLASS_COUNT, "invalid TX slab class index");
     chunk->next = pool->free_lists[class_idx];
     pool->free_lists[class_idx] = chunk;
 }
@@ -199,6 +229,8 @@ static void tx_release_chunk(TxSlabPool *pool, TxChunk *chunk) {
 //  Drop and release all queued TX state for a connection. Used on final close
 // and worker teardown.
 static void tx_drop_queue(Connection *conn, TxSlabPool *pool) {
+    ASSERT(conn != nullptr, "tx_drop_queue requires conn");
+    ASSERT(pool != nullptr, "tx_drop_queue requires pool");
     TxChunk *chunk = conn->tx_head;
     while (chunk) {
         TxChunk *next = chunk->next;
@@ -210,6 +242,7 @@ static void tx_drop_queue(Connection *conn, TxSlabPool *pool) {
     conn->tx_head_sent = 0;
     conn->tx_bytes_queued = 0;
     conn->send_inflight = false;
+    tx_assert_conn_invariants(conn);
 }
 
 //  Drop unsent queued chunks but keep the in-flight head alive until its SEND
@@ -219,6 +252,8 @@ static void tx_drop_queue(Connection *conn, TxSlabPool *pool) {
 // submitted: the kernel may still read from tx_head, so freeing it early would
 // create a use-after-free.
 static void tx_drop_after_head(Connection *conn, TxSlabPool *pool) {
+    ASSERT(conn != nullptr, "tx_drop_after_head requires conn");
+    ASSERT(pool != nullptr, "tx_drop_after_head requires pool");
     if (!conn->tx_head) {
         conn->tx_tail = nullptr;
         conn->tx_head_sent = 0;
@@ -226,6 +261,9 @@ static void tx_drop_after_head(Connection *conn, TxSlabPool *pool) {
         conn->send_inflight = false;
         return;
     }
+
+    ASSERT(conn->send_inflight, "tx_drop_after_head expects in-flight send");
+    ASSERT(conn->tx_head_sent <= conn->tx_head->len, "tx_head_sent out of range");
 
     TxChunk *chunk = conn->tx_head->next;
     while (chunk) {
@@ -237,6 +275,7 @@ static void tx_drop_after_head(Connection *conn, TxSlabPool *pool) {
     conn->tx_head->next = nullptr;
     conn->tx_tail = conn->tx_head;
     conn->tx_bytes_queued = conn->tx_head->len - conn->tx_head_sent;
+    tx_assert_conn_invariants(conn);
 }
 
 //  Free all slab-managed allocations for this worker.
@@ -245,6 +284,7 @@ static void tx_drop_after_head(Connection *conn, TxSlabPool *pool) {
 // classed chunk is freed exactly once regardless of whether it is currently
 // queued, in free list, or recently popped.
 static void tx_pool_destroy(TxSlabPool *pool) {
+    ASSERT(pool != nullptr, "tx_pool_destroy requires pool");
     for (uint32_t i = 0; i < TX_CLASS_COUNT; i++) {
         TxChunk *chunk = pool->alloc_lists[i];
         while (chunk) {
@@ -264,6 +304,10 @@ static void tx_pool_destroy(TxSlabPool *pool) {
 // unbounded memory growth.
 static bool tx_enqueue(Connection *conn, TxSlabPool *pool,
                        const uint8_t *data, uint32_t len) {
+    ASSERT(conn != nullptr, "tx_enqueue requires conn");
+    ASSERT(pool != nullptr, "tx_enqueue requires pool");
+    ASSERT(data != nullptr || len == 0, "tx_enqueue null data with non-zero length");
+    tx_assert_conn_invariants(conn);
     if (len == 0) return true;
     if (conn->tx_bytes_queued >= TX_HIGH_WATERMARK_BYTES) return false;
     if (len > TX_HIGH_WATERMARK_BYTES - conn->tx_bytes_queued) return false;
@@ -274,11 +318,13 @@ static bool tx_enqueue(Connection *conn, TxSlabPool *pool,
                         (!conn->send_inflight || conn->tx_tail != conn->tx_head);
     if (tail_mutable) {
         TxChunk *tail = conn->tx_tail;
+        ASSERT(tail != nullptr, "tail_mutable requires tx_tail");
         uint32_t tail_free = tail->cap - tail->len;
         if (len <= tail_free) {
             std::memcpy(tx_chunk_data(tail) + tail->len, data, len);
             tail->len += len;
             conn->tx_bytes_queued += len;
+            tx_assert_conn_invariants(conn);
             return true;
         }
     }
@@ -294,6 +340,7 @@ static bool tx_enqueue(Connection *conn, TxSlabPool *pool,
     else conn->tx_head = chunk;
     conn->tx_tail = chunk;
     conn->tx_bytes_queued += len;
+    tx_assert_conn_invariants(conn);
     return true;
 }
 
@@ -301,22 +348,33 @@ static bool tx_enqueue(Connection *conn, TxSlabPool *pool,
 // One in-flight send per connection keeps ordering straightforward and avoids
 // multi-SQE ownership complexity.
 static int submit_tx_head(Connection *conn, IoOps *ops, IoBackend *backend) {
+    ASSERT(conn != nullptr, "submit_tx_head requires conn");
+    ASSERT(ops != nullptr, "submit_tx_head requires ops");
+    ASSERT(ops->submit_send != nullptr, "submit_send op is required");
+    tx_assert_conn_invariants(conn);
     if (conn->closing || conn->send_inflight || !conn->tx_head) return 0;
 
     TxChunk *head = conn->tx_head;
+    ASSERT(head != nullptr, "tx_head must exist");
+    ASSERT(head->len >= conn->tx_head_sent, "tx_head_sent exceeds head length");
     uint32_t remaining = head->len - conn->tx_head_sent;
+    ASSERT(remaining > 0, "submit_tx_head requires remaining bytes");
     if (remaining == 0) return -EINVAL;
 
     int ret = ops->submit_send(backend, conn->fd,
                                tx_chunk_data(head) + conn->tx_head_sent,
                                remaining);
     if (ret == 0) conn->send_inflight = true;
+    tx_assert_conn_invariants(conn);
     return ret;
 }
 
 // Destroy connection state without touching the kernel fd.
 static void destroy_connection(int fd, Connection **conns, TxSlabPool *pool) {
+    ASSERT(conns != nullptr, "destroy_connection requires conns table");
+    ASSERT(pool != nullptr, "destroy_connection requires pool");
     if (fd < 0 || fd >= MAX_CONNECTIONS || !conns[fd]) return;
+    ASSERT(conns[fd]->fd == fd, "connection fd index mismatch");
     tx_drop_queue(conns[fd], pool);
     connection_destroy(conns[fd]);
     conns[fd] = nullptr;
@@ -327,6 +385,7 @@ static void destroy_connection(int fd, Connection **conns, TxSlabPool *pool) {
 // is critical for the thread-per-core model (each core has its own io_uring
 // ring, listen socket, and connection state — no sharing).
 static int pin_to_core(int cpu_id) {
+    ASSERT(cpu_id >= 0, "cpu_id must be non-negative");
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
     CPU_SET(cpu_id, &cpuset);
@@ -393,8 +452,16 @@ static int create_listen_socket(uint16_t port) {
 static void submit_close_or_defer(int fd, Connection **conns, IoOps *ops,
                                   IoBackend *backend, WorkerState *state,
                                   TxSlabPool *pool) {
+    ASSERT(conns != nullptr, "submit_close_or_defer requires conns table");
+    ASSERT(ops != nullptr, "submit_close_or_defer requires ops");
+    ASSERT(ops->submit_close != nullptr, "submit_close op is required");
+    ASSERT(state != nullptr, "submit_close_or_defer requires state");
+    ASSERT(pool != nullptr, "submit_close_or_defer requires pool");
     if (fd < 0 || fd >= MAX_CONNECTIONS || !conns[fd]) return;
     Connection *conn = conns[fd];
+    ASSERT(conn->fd == fd, "connection fd index mismatch");
+    ASSERT(!(conn->close_submitted && conn->close_in_retry_queue),
+           "close state cannot be submitted and queued");
 
     if (conn->close_submitted || conn->close_in_retry_queue || conn->send_inflight)
         return;
@@ -424,6 +491,9 @@ static void submit_close_or_defer(int fd, Connection **conns, IoOps *ops,
 
 static void submit_orphan_close_or_defer(int fd, IoOps *ops,
                                          IoBackend *backend, WorkerState *state) {
+    ASSERT(ops != nullptr, "submit_orphan_close_or_defer requires ops");
+    ASSERT(ops->submit_close != nullptr, "submit_close op is required");
+    ASSERT(state != nullptr, "submit_orphan_close_or_defer requires state");
     if (fd < 0 || fd >= MAX_CONNECTIONS) return;
 
     int ret = ops->submit_close(backend, fd);
@@ -489,8 +559,14 @@ static void submit_orphan_close_or_defer(int fd, IoOps *ops,
 //   3) otherwise drop TX queue and submit close immediately/deferred
 static void try_close(int fd, Connection **conns, IoOps *ops,
                       IoBackend *backend, WorkerState *state, TxSlabPool *pool) {
+    ASSERT(conns != nullptr, "try_close requires conns table");
+    ASSERT(ops != nullptr, "try_close requires ops");
+    ASSERT(state != nullptr, "try_close requires state");
+    ASSERT(pool != nullptr, "try_close requires pool");
     if (fd < 0 || fd >= MAX_CONNECTIONS || !conns[fd]) return;
     Connection *conn = conns[fd];
+    ASSERT(conn->fd == fd, "connection fd index mismatch");
+    tx_assert_conn_invariants(conn);
 
     conn->closing = true;
 
@@ -511,11 +587,16 @@ struct RecycleBatch {
 };
 
 static void recycle_add(RecycleBatch *batch, uint16_t buf_id) {
+    ASSERT(batch != nullptr, "recycle_add requires batch");
+    ASSERT(batch->count <= MAX_COMPLETIONS, "recycle batch count out of range");
     if (batch->count < MAX_COMPLETIONS)
         batch->ids[batch->count++] = buf_id;
 }
 
 static void recycle_flush(RecycleBatch *batch, IoOps *ops, IoBackend *backend) {
+    ASSERT(batch != nullptr, "recycle_flush requires batch");
+    ASSERT(ops != nullptr, "recycle_flush requires ops");
+    ASSERT(ops->recycle_buffer != nullptr, "recycle_buffer op is required");
     if (batch->count == 0) return;
 
     if (ops->recycle_buffers) {
@@ -530,6 +611,14 @@ static void recycle_flush(RecycleBatch *batch, IoOps *ops, IoBackend *backend) {
 static void handle_accept(const IoCompletion *comp, Connection **conns,
                           IoOps *ops, IoBackend *backend, int listen_fd,
                           WorkerState *state, TxSlabPool *pool) {
+    ASSERT(comp != nullptr, "handle_accept requires completion");
+    ASSERT(conns != nullptr, "handle_accept requires conns table");
+    ASSERT(ops != nullptr, "handle_accept requires ops");
+    ASSERT(state != nullptr, "handle_accept requires state");
+    ASSERT(pool != nullptr, "handle_accept requires pool");
+    ASSERT(ops->submit_accept != nullptr, "submit_accept op is required");
+    ASSERT(ops->submit_recv != nullptr, "submit_recv op is required");
+    ASSERT(ops->submit_nodelay != nullptr, "submit_nodelay op is required");
     if (comp->result < 0) {
         std::fprintf(stderr, "accept: completion failed: %s\n", std::strerror(-comp->result));
         if (!comp->more) {
@@ -546,11 +635,14 @@ static void handle_accept(const IoCompletion *comp, Connection **conns,
 
     int fd = comp->fd;
     if (fd < 0 || fd >= MAX_CONNECTIONS) {
+        ASSERT_FMT(false, "accept returned out-of-range fd index %d", fd);
         std::fprintf(stderr, "accept: fd %d out of range\n", fd);
         return;
     }
 
     // A stale entry here indicates a logic bug in close lifecycle handling.
+    ASSERT_FMT(conns[fd] == nullptr,
+               "accept returned stale connection slot fd=%d", fd);
     if (conns[fd]) {
         std::fprintf(stderr, "accept: replacing stale connection at fd %d\n", fd);
         destroy_connection(fd, conns, pool);
@@ -574,6 +666,15 @@ static void handle_recv(const IoCompletion *comp, Connection **conns,
                         IoOps *ops, IoBackend *backend,
                         WorkerState *state, RecycleBatch *recycle,
                         TxSlabPool *pool) {
+    ASSERT(comp != nullptr, "handle_recv requires completion");
+    ASSERT(conns != nullptr, "handle_recv requires conns table");
+    ASSERT(protocol_state != nullptr, "handle_recv requires protocol state");
+    ASSERT(ops != nullptr, "handle_recv requires ops");
+    ASSERT(state != nullptr, "handle_recv requires state");
+    ASSERT(recycle != nullptr, "handle_recv requires recycle batch");
+    ASSERT(pool != nullptr, "handle_recv requires pool");
+    ASSERT(ops->submit_recv != nullptr, "submit_recv op is required");
+
     int fd = comp->fd;
     if (fd < 0 || fd >= MAX_CONNECTIONS || !conns[fd]) {
         if (comp->buf) recycle_add(recycle, comp->buf_id);
@@ -581,6 +682,9 @@ static void handle_recv(const IoCompletion *comp, Connection **conns,
     }
 
     Connection *conn = conns[fd];
+    ASSERT(conn->fd == fd, "connection fd index mismatch");
+    ASSERT(conn->input_len <= CONN_BUF_SIZE, "input_len exceeds connection buffer");
+    tx_assert_conn_invariants(conn);
 
     if (conn->closing) {
         if (!comp->more && !conn->close_submitted && !conn->send_inflight)
@@ -632,8 +736,11 @@ static void handle_recv(const IoCompletion *comp, Connection **conns,
         ProtocolParseResult result = protocol_parse(parse_buf + offset, parse_len - offset, &cmd, &consumed);
 
         if (result == PROTOCOL_PARSE_OK) {
+            ASSERT(consumed > 0, "parse OK must consume bytes");
+            ASSERT(consumed <= parse_len - offset, "parser consumed beyond input");
             uint32_t resp_len = protocol_execute(&cmd, protocol_state, now_ms,
                                                  response_buf, RESPONSE_BUF_SIZE);
+            ASSERT(resp_len <= RESPONSE_BUF_SIZE, "protocol_execute overflowed response buffer");
             if (resp_len > RESPONSE_BUF_SIZE) {
                 try_close(fd, conns, ops, backend, state, pool);
                 goto recycle;
@@ -652,6 +759,7 @@ static void handle_recv(const IoCompletion *comp, Connection **conns,
 
         if (result == PROTOCOL_PARSE_INCOMPLETE) {
             uint32_t remaining = parse_len - offset;
+            ASSERT(remaining <= parse_len, "remaining bytes out of range");
             if (remaining > CONN_BUF_SIZE) {
                 try_close(fd, conns, ops, backend, state, pool);
                 goto recycle;
@@ -667,6 +775,7 @@ static void handle_recv(const IoCompletion *comp, Connection **conns,
                 }
             }
             conn->input_len = remaining;
+            ASSERT(conn->input_len <= CONN_BUF_SIZE, "input_len exceeds connection buffer");
             break;
         }
 
@@ -686,15 +795,24 @@ static void handle_recv(const IoCompletion *comp, Connection **conns,
     }
 
 recycle:
+    ASSERT(conn->input_len <= CONN_BUF_SIZE, "input_len exceeds connection buffer");
+    tx_assert_conn_invariants(conn);
     if (comp->buf) recycle_add(recycle, comp->buf_id);
 }
 
 static void handle_send(const IoCompletion *comp, Connection **conns,
                         IoOps *ops, IoBackend *backend, WorkerState *state,
                         TxSlabPool *pool) {
+    ASSERT(comp != nullptr, "handle_send requires completion");
+    ASSERT(conns != nullptr, "handle_send requires conns table");
+    ASSERT(ops != nullptr, "handle_send requires ops");
+    ASSERT(state != nullptr, "handle_send requires state");
+    ASSERT(pool != nullptr, "handle_send requires pool");
     int fd = comp->fd;
     if (fd < 0 || fd >= MAX_CONNECTIONS || !conns[fd]) return;
     Connection *conn = conns[fd];
+    ASSERT(conn->fd == fd, "connection fd index mismatch");
+    tx_assert_conn_invariants(conn);
 
     // Guard against stale/late completions after connection state changes.
     if (!conn->send_inflight || !conn->tx_head) {
@@ -704,7 +822,10 @@ static void handle_send(const IoCompletion *comp, Connection **conns,
     }
 
     TxChunk *head = conn->tx_head;
+    ASSERT(head != nullptr, "send completion requires tx head");
+    ASSERT(head->len >= conn->tx_head_sent, "tx_head_sent exceeds head len");
     uint32_t remaining = head->len - conn->tx_head_sent;
+    ASSERT(remaining > 0, "inflight send requires remaining bytes");
 
         //  SEND completion must be in (0, remaining]. Zero or overrun is treated as
     // a protocol/transport error for this connection state machine.
@@ -721,6 +842,7 @@ static void handle_send(const IoCompletion *comp, Connection **conns,
 
     uint32_t sent = static_cast<uint32_t>(comp->result);
     conn->tx_head_sent += sent;
+    ASSERT(conn->tx_bytes_queued >= sent, "tx_bytes_queued underflow");
     conn->tx_bytes_queued -= sent;
     conn->send_inflight = false;
 
@@ -744,15 +866,22 @@ static void handle_send(const IoCompletion *comp, Connection **conns,
         if (submit_tx_head(conn, ops, backend) < 0)
             try_close(fd, conns, ops, backend, state, pool);
     }
+    tx_assert_conn_invariants(conn);
 }
 
 static void handle_close(const IoCompletion *comp, Connection **conns,
                          IoOps *ops, IoBackend *backend, WorkerState *state,
                          TxSlabPool *pool) {
+    ASSERT(comp != nullptr, "handle_close requires completion");
+    ASSERT(conns != nullptr, "handle_close requires conns table");
+    ASSERT(ops != nullptr, "handle_close requires ops");
+    ASSERT(state != nullptr, "handle_close requires state");
+    ASSERT(pool != nullptr, "handle_close requires pool");
     int fd = comp->fd;
     if (fd < 0 || fd >= MAX_CONNECTIONS || !conns[fd]) return;
 
     Connection *conn = conns[fd];
+    ASSERT(conn->fd == fd, "connection fd index mismatch");
     conn->close_submitted = false;
     conn->close_in_retry_queue = false;
 
@@ -767,6 +896,8 @@ static void handle_close(const IoCompletion *comp, Connection **conns,
 static void handle_error(const IoCompletion *comp, Connection **conns,
                          IoOps *ops, IoBackend *backend, WorkerState *state,
                          TxSlabPool *pool) {
+    ASSERT(comp != nullptr, "handle_error requires completion");
+    ASSERT(conns != nullptr, "handle_error requires conns table");
     int fd = comp->fd;
     if (fd < 0 || fd >= MAX_CONNECTIONS || !conns[fd]) return;
     if (!conns[fd]->closing)
@@ -774,6 +905,19 @@ static void handle_error(const IoCompletion *comp, Connection **conns,
 }
 
 int worker_run(WorkerConfig *config) {
+    ASSERT(config != nullptr, "worker_run requires config");
+    ASSERT(config->running != nullptr, "worker_run requires running flag");
+    ASSERT(config->ops.init != nullptr, "ops.init is required");
+    ASSERT(config->ops.submit_accept != nullptr, "ops.submit_accept is required");
+    ASSERT(config->ops.submit_recv != nullptr, "ops.submit_recv is required");
+    ASSERT(config->ops.submit_send != nullptr, "ops.submit_send is required");
+    ASSERT(config->ops.submit_close != nullptr, "ops.submit_close is required");
+    ASSERT(config->ops.submit_nodelay != nullptr, "ops.submit_nodelay is required");
+    ASSERT(config->ops.wait != nullptr, "ops.wait is required");
+    ASSERT(config->ops.destroy != nullptr, "ops.destroy is required");
+    ASSERT(!config->skip_setup || config->listen_fd >= 0,
+           "skip_setup requires pre-created listen fd");
+
     int listen_fd = -1;
 
     if (config->skip_setup) {
@@ -903,6 +1047,7 @@ int worker_run(WorkerConfig *config) {
                          config->cpu_id, std::strerror(-n));
             break;
         }
+        ASSERT(n <= MAX_COMPLETIONS, "wait returned more completions than buffer size");
 
         RecycleBatch recycle = {};
 
@@ -931,6 +1076,8 @@ int worker_run(WorkerConfig *config) {
                 break;
             case IoCompletion::IGNORE:
                 break;
+            default:
+                DALAHASH_UNREACHABLE("unknown completion kind");
             }
         }
 

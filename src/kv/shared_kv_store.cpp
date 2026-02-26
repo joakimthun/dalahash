@@ -13,6 +13,7 @@
 //     progress for safe node reclamation.
 
 #include "shared_kv_store.h"
+#include "base/assert.h"
 
 #include <atomic>
 #include <cerrno>
@@ -124,7 +125,10 @@ static uint32_t next_pow2_u32(uint32_t v) {
     v |= v >> 4;
     v |= v >> 8;
     v |= v >> 16;
-    return v + 1;
+    uint32_t out = v + 1;
+    ASSERT(out != 0, "next_pow2_u32 overflowed");
+    ASSERT((out & (out - 1u)) == 0, "next_pow2_u32 result is not power of two");
+    return out;
 }
 
 static uint64_t hash_bytes(std::string_view v) {
@@ -144,11 +148,14 @@ static uint64_t hash_bytes(std::string_view v) {
 
 // Shard selection uses high hash bits to decorrelate from low-bit bucket mask.
 static uint32_t select_shard(uint64_t hash, uint32_t shard_mask) {
+    ASSERT((shard_mask & (shard_mask + 1u)) == 0, "shard_mask must be 2^n-1");
     return static_cast<uint32_t>((hash >> 32u) & static_cast<uint64_t>(shard_mask));
 }
 
 // Second candidate bucket for two-choice placement/lookup.
 static uint32_t secondary_bucket(uint64_t hash, uint32_t bucket_mask, uint32_t b1) {
+    ASSERT((bucket_mask & (bucket_mask + 1u)) == 0, "bucket_mask must be 2^n-1");
+    ASSERT((b1 & ~bucket_mask) == 0, "primary bucket index out of range");
     uint64_t mixed = hash ^ (hash >> 19u) ^ (hash << 11u) ^ 0x9e3779b97f4a7c15ull;
     uint32_t b2 = static_cast<uint32_t>(mixed) & bucket_mask;
     if (b2 == b1) b2 = (b1 + 1u) & bucket_mask;
@@ -157,20 +164,26 @@ static uint32_t secondary_bucket(uint64_t hash, uint32_t bucket_mask, uint32_t b
 
 // Return pointer to one lane in flat slot array.
 static inline std::atomic<Node *> *slot_ptr(Shard *shard, uint32_t bucket_idx, uint32_t lane) {
+    ASSERT(shard != nullptr, "slot_ptr requires shard");
+    ASSERT(bucket_idx < shard->bucket_count, "bucket index out of range");
+    ASSERT(lane < KV_BUCKET_SLOTS, "bucket lane out of range");
     return &shard->slots[static_cast<size_t>(bucket_idx) * KV_BUCKET_SLOTS + lane];
 }
 
 // Payload slicing helpers.
 static inline const uint8_t *node_key_ptr(const Node *n) {
+    ASSERT(n != nullptr, "node_key_ptr requires node");
     return n->bytes;
 }
 
 static inline const uint8_t *node_value_ptr(const Node *n) {
+    ASSERT(n != nullptr, "node_value_ptr requires node");
     return n->bytes + n->key_len;
 }
 
 // Binary-safe key equality against packed node key.
 static bool node_key_equals(const Node *n, std::string_view key) {
+    ASSERT(n != nullptr, "node_key_equals requires node");
     if (n->key_len != key.size()) return false;
     if (n->key_len == 0) return true;
     return std::memcmp(node_key_ptr(n), key.data(), key.size()) == 0;
@@ -178,6 +191,7 @@ static bool node_key_equals(const Node *n, std::string_view key) {
 
 // Expiration predicate; 0 means immortal.
 static bool node_is_expired(const Node *n, uint64_t now_ms) {
+    ASSERT(n != nullptr, "node_is_expired requires node");
     return n->expire_at_ms != 0 && now_ms >= n->expire_at_ms;
 }
 
@@ -197,6 +211,7 @@ static uint64_t compute_expire_at(uint64_t now_ms, const KvSetOptions *opts) {
 // Resolve worker state for worker-id range checks.
 static WorkerState *worker_state_in_range(KvStore *store, uint32_t worker_id) {
     if (!store || store->worker_count == 0) return nullptr;
+    ASSERT(store->workers != nullptr, "store workers array must be initialized");
     if (worker_id >= store->worker_count) return nullptr;
     return &store->workers[worker_id];
 }
@@ -211,6 +226,7 @@ static WorkerState *worker_state_registered(KvStore *store, uint32_t worker_id) 
 
 // Select smallest class that can hold size; -1 => large path.
 static int select_class(uint32_t size) {
+    ASSERT(size > 0, "select_class requires non-zero size");
     for (uint32_t i = 0; i < KV_CLASS_COUNT; i++) {
         if (size <= KV_CLASS_SIZES[i]) return static_cast<int>(i);
     }
@@ -218,6 +234,8 @@ static int select_class(uint32_t size) {
 }
 
 static bool pool_grow(ClassPool *pool) {
+    ASSERT(pool != nullptr, "pool_grow requires pool");
+    ASSERT(pool->obj_size > 0, "pool obj_size must be non-zero");
     // Allocate one contiguous backing block for this class.
     size_t bytes = static_cast<size_t>(pool->obj_size) * KV_GROW_BATCH;
     void *mem = std::malloc(bytes);
@@ -276,6 +294,7 @@ static Node *node_alloc(KvStore *store, uint64_t hash,
     uint8_t stored_class = KV_CLASS_LARGE;
 
     if (class_idx >= 0) {
+        ASSERT(class_idx < static_cast<int>(KV_CLASS_COUNT), "class index out of range");
         // Fast path: pop one object from class free list.
         ClassPool *pool = &store->pools[class_idx];
         alloc_size = pool->obj_size;
@@ -295,6 +314,7 @@ static Node *node_alloc(KvStore *store, uint64_t hash,
             }
         }
         stored_class = static_cast<uint8_t>(class_idx);
+        ASSERT(alloc_size >= raw_size, "class alloc_size smaller than requested raw size");
     } else {
         // Rare large object path bypasses pools.
         alloc_size = static_cast<uint32_t>(raw_size);
@@ -317,6 +337,9 @@ static Node *node_alloc(KvStore *store, uint64_t hash,
     node->reserved2 = 0;
     node->gc_next = nullptr;
     node->refbit.store(1, std::memory_order_relaxed);
+    ASSERT(node->class_idx == KV_CLASS_LARGE || node->class_idx < KV_CLASS_COUNT,
+           "stored node class index out of range");
+    ASSERT(node->alloc_size >= raw_size, "node alloc_size smaller than raw size");
 
     if (!key.empty())
         std::memcpy(node->bytes, key.data(), key.size());
@@ -333,6 +356,8 @@ static void node_free(KvStore *store, Node *node) {
         return;
     }
     uint8_t class_idx = node->class_idx;
+    ASSERT(class_idx == KV_CLASS_LARGE || class_idx < KV_CLASS_COUNT,
+           "node class index out of range");
     if (class_idx >= KV_CLASS_COUNT) {
         std::free(node);
         return;
@@ -351,6 +376,7 @@ static void node_free(KvStore *store, Node *node) {
 static void retire_node(KvStore *store, uint32_t worker_id, Node *node) {
     if (!store || !node) return;
     WorkerState *ws = worker_state_registered(store, worker_id);
+    ASSERT(ws != nullptr, "retire_node requires registered worker");
     if (!ws) return;
     // Monotonic sequence gives a global ordering for deferred reclamation.
     uint64_t seq = store->global_seq.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -362,6 +388,16 @@ static void retire_node(KvStore *store, uint32_t worker_id, Node *node) {
 
 static bool evict_one_from_shard(KvStore *store, uint32_t worker_id,
                                  Shard *shard, uint64_t now_ms) {
+    ASSERT(store != nullptr, "evict_one_from_shard requires store");
+    ASSERT(shard != nullptr, "evict_one_from_shard requires shard");
+    ASSERT(shard->slots != nullptr, "shard slots must be initialized");
+    ASSERT(shard->bucket_count > 0, "bucket_count must be non-zero");
+    ASSERT((shard->bucket_count & (shard->bucket_count - 1u)) == 0,
+           "bucket_count must be power of two");
+    ASSERT(shard->bucket_mask == shard->bucket_count - 1u,
+           "bucket_mask must equal bucket_count-1");
+    ASSERT(worker_state_registered(store, worker_id) != nullptr,
+           "eviction requires registered worker");
     // Start near previous position to spread eviction cost over table.
     uint32_t start = shard->clock_hand.fetch_add(1, std::memory_order_relaxed);
     uint32_t max_scan = shard->bucket_count;
@@ -399,6 +435,12 @@ static bool evict_one_from_shard(KvStore *store, uint32_t worker_id,
 }
 
 static bool trim_to_capacity(KvStore *store, uint32_t worker_id, uint64_t now_ms) {
+    ASSERT(store != nullptr, "trim_to_capacity requires store");
+    ASSERT(store->shard_count > 0, "shard_count must be non-zero");
+    ASSERT((store->shard_count & (store->shard_count - 1u)) == 0,
+           "shard_count must be power of two");
+    ASSERT(store->shard_mask == store->shard_count - 1u,
+           "shard_mask must equal shard_count-1");
     uint64_t live = store->live_bytes.load(std::memory_order_acquire);
     if (live <= store->capacity_bytes) return true;
 
@@ -434,6 +476,8 @@ KvStore *kv_store_create(const KvStoreConfig *config) {
     // Normalize config with safe defaults and power-of-two geometry.
     uint32_t worker_count = config->worker_count == 0 ? 1 : config->worker_count;
     uint64_t capacity = config->capacity_bytes == 0 ? (256ull << 20) : config->capacity_bytes;
+    ASSERT(worker_count > 0, "worker_count must be non-zero");
+    ASSERT(capacity > 0, "capacity must be non-zero");
 
     uint32_t shard_count = config->shard_count;
     if (shard_count == 0) {
@@ -443,6 +487,8 @@ KvStore *kv_store_create(const KvStoreConfig *config) {
     } else {
         shard_count = next_pow2_u32(shard_count);
     }
+    ASSERT(shard_count > 0, "shard_count must be non-zero");
+    ASSERT((shard_count & (shard_count - 1u)) == 0, "shard_count must be power of two");
 
     uint32_t buckets_per_shard = config->buckets_per_shard;
     if (buckets_per_shard == 0) {
@@ -455,6 +501,9 @@ KvStore *kv_store_create(const KvStoreConfig *config) {
     } else {
         buckets_per_shard = next_pow2_u32(buckets_per_shard);
     }
+    ASSERT(buckets_per_shard > 0, "buckets_per_shard must be non-zero");
+    ASSERT((buckets_per_shard & (buckets_per_shard - 1u)) == 0,
+           "buckets_per_shard must be power of two");
 
     auto *store = new (std::nothrow) KvStore();
     if (!store) return nullptr;
@@ -506,6 +555,11 @@ KvStore *kv_store_create(const KvStoreConfig *config) {
         shard->bucket_count = buckets_per_shard;
         shard->bucket_mask = buckets_per_shard - 1;
         shard->clock_hand.store(0, std::memory_order_relaxed);
+        ASSERT(shard->bucket_count > 0, "bucket_count must be non-zero");
+        ASSERT((shard->bucket_count & (shard->bucket_count - 1u)) == 0,
+               "bucket_count must be power of two");
+        ASSERT(shard->bucket_mask == shard->bucket_count - 1u,
+               "bucket_mask must equal bucket_count-1");
         size_t slot_count = static_cast<size_t>(buckets_per_shard) * KV_BUCKET_SLOTS;
         shard->slots = static_cast<std::atomic<Node *> *>(
             std::malloc(sizeof(std::atomic<Node *>) * slot_count));
@@ -537,6 +591,8 @@ KvStore *kv_store_create(const KvStoreConfig *config) {
 
 void kv_store_destroy(KvStore *store) {
     if (!store) return;
+    ASSERT(store->workers != nullptr, "store workers must be initialized");
+    ASSERT(store->shards != nullptr, "store shards must be initialized");
 
     // Destroy requires external synchronization; no concurrent readers/writers.
     for (uint32_t s = 0; s < store->shard_count; s++) {
@@ -627,6 +683,10 @@ void kv_store_quiescent(KvStore *store, uint32_t worker_id) {
 KvGetStatus kv_store_get(KvStore *store, uint32_t worker_id, std::string_view key,
                          uint64_t now_ms, KvValueView *out) {
     if (!store || !out) return KvGetStatus::MISS;
+    ASSERT(store->shards != nullptr, "store shards must be initialized");
+    ASSERT(store->shard_count > 0, "shard_count must be non-zero");
+    ASSERT(store->shard_mask == store->shard_count - 1u,
+           "shard_mask must equal shard_count-1");
 
     out->data = nullptr;
     out->len = 0;
@@ -680,6 +740,10 @@ KvSetStatus kv_store_set(KvStore *store, uint32_t worker_id, std::string_view ke
                          std::string_view value, uint64_t now_ms,
                          const KvSetOptions *opts) {
     if (!store) return KvSetStatus::INVALID;
+    ASSERT(store->shards != nullptr, "store shards must be initialized");
+    ASSERT(store->shard_count > 0, "shard_count must be non-zero");
+    ASSERT(store->shard_mask == store->shard_count - 1u,
+           "shard_mask must equal shard_count-1");
     if (!worker_state_registered(store, worker_id)) return KvSetStatus::INVALID;
 
     uint64_t hash = hash_bytes(key);

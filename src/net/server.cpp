@@ -1,6 +1,7 @@
 // server.cpp — Spawns worker threads, handles shutdown signals.
 
 #include "server.h"
+#include "base/assert.h"
 #include "kv/shared_kv_store.h"
 #include "io_uring_backend.h"
 #include "worker.h"
@@ -36,6 +37,9 @@ static constexpr uint32_t BUF_COUNT = 1024;  // provided buffers per worker
 static constexpr uint32_t BUF_SIZE  = 4096;
 
 int server_start(const ServerConfig *config) {
+    ASSERT(config != nullptr, "server_start requires config");
+    if (!config) return 1;
+
     int num_workers = config->num_workers;
     if (num_workers <= 0) {
                 //  sysconf(3) _SC_NPROCESSORS_ONLN — number of CPUs currently online.
@@ -43,6 +47,7 @@ int server_start(const ServerConfig *config) {
         num_workers = static_cast<int>(sysconf(_SC_NPROCESSORS_ONLN));
         if (num_workers <= 0) num_workers = 1;
     }
+    ASSERT(num_workers > 0, "num_workers must be positive");
 
     std::fprintf(stderr, "dalahash: starting %d workers on port %d\n",
                  num_workers, config->port);
@@ -58,8 +63,8 @@ int server_start(const ServerConfig *config) {
     sa.sa_handler = signal_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
-    sigaction(SIGINT,  &sa, nullptr);
-    sigaction(SIGTERM, &sa, nullptr);
+    ASSERT(sigaction(SIGINT,  &sa, nullptr) == 0, "sigaction(SIGINT) failed");
+    ASSERT(sigaction(SIGTERM, &sa, nullptr) == 0, "sigaction(SIGTERM) failed");
 
     g_running.store(true, std::memory_order_relaxed);
 
@@ -110,7 +115,10 @@ int server_start(const ServerConfig *config) {
     }
 
     for (int i = 0; i < num_workers; i++) {
-        if (threads[i]) pthread_join(threads[i], nullptr);
+        if (threads[i]) {
+            int join_ret = pthread_join(threads[i], nullptr);
+            ASSERT(join_ret == 0, "pthread_join failed");
+        }
     }
 
     kv_store_destroy(shared_store);

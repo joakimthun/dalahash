@@ -56,6 +56,7 @@
 //   worker. This avoids any per-SQE heap allocation — decoding is a shift+mask.
 
 #include "io_uring_backend.h"
+#include "base/assert.h"
 #include "connection.h"
 
 #include <cerrno>
@@ -85,6 +86,19 @@ static inline int decode_fd(uint64_t ud) {
 
 static constexpr int BUF_GROUP_ID = 0;
 
+[[maybe_unused]] static inline bool is_power_of_two_u32(uint32_t v) {
+    return v != 0 && (v & (v - 1u)) == 0;
+}
+
+[[maybe_unused]] static inline bool completion_kind_valid(IoCompletion::Kind kind) {
+    return kind == IoCompletion::ACCEPT ||
+           kind == IoCompletion::RECV ||
+           kind == IoCompletion::SEND ||
+           kind == IoCompletion::CLOSE ||
+           kind == IoCompletion::ERROR ||
+           kind == IoCompletion::IGNORE;
+}
+
 struct UringBackend {
     struct io_uring ring;
     struct io_uring_buf_ring *buf_ring;
@@ -102,7 +116,13 @@ struct UringBackend {
 // io_uring_setup(2)) requires the thread that initializes the ring to be
 // the only thread that ever submits SQEs to it.
 static int uring_init(IoBackend *ctx) {
+    ASSERT(ctx != nullptr, "uring_init requires backend context");
     auto *be = reinterpret_cast<UringBackend *>(ctx);
+    ASSERT(be->ring_size > 0, "ring_size must be non-zero");
+    ASSERT(be->buf_count > 0, "buf_count must be non-zero");
+    ASSERT(is_power_of_two_u32(be->buf_count), "buf_count must be power of two");
+    ASSERT(be->buf_size > 0, "buf_size must be non-zero");
+    ASSERT(be->buf_pool != nullptr, "buf_pool must be allocated");
 
         //  io_uring_setup(2) flags — each one tightens the kernel/userspace contract
     // for better performance in our thread-per-core model:
@@ -167,6 +187,7 @@ static int uring_init(IoBackend *ctx) {
     // contiguous buf_pool.
     size_t ring_entries_size = be->buf_count * sizeof(struct io_uring_buf);
     size_t page_size = static_cast<size_t>(sysconf(_SC_PAGESIZE));
+    ASSERT(page_size > 0, "sysconf(_SC_PAGESIZE) must be positive");
 
         //  posix_memalign(3) — page-aligned allocation required by the kernel for
     // the buf_ring shared mapping.
@@ -250,6 +271,8 @@ static int uring_init(IoBackend *ctx) {
 //
 // Using direct accept avoids one fd_install + fget/fput cycle per connection.
 static int uring_submit_accept(IoBackend *ctx, int listen_fd) {
+    ASSERT(ctx != nullptr, "uring_submit_accept requires backend");
+    ASSERT(listen_fd >= 0, "listen fd must be non-negative");
     auto *be = reinterpret_cast<UringBackend *>(ctx);
     struct io_uring_sqe *sqe = io_uring_get_sqe(&be->ring);
     if (!sqe) return -ENOSPC;
@@ -274,6 +297,8 @@ static int uring_submit_accept(IoBackend *ctx, int listen_fd) {
 // kernel terminates the multishot recv with -ENOBUFS — we'd need to resubmit
 // after recycling. Currently we size the pool large enough to avoid this.
 static int uring_submit_recv(IoBackend *ctx, int fd) {
+    ASSERT(ctx != nullptr, "uring_submit_recv requires backend");
+    ASSERT(fd >= 0 && fd < MAX_CONNECTIONS, "recv fd index out of range");
     auto *be = reinterpret_cast<UringBackend *>(ctx);
     struct io_uring_sqe *sqe = io_uring_get_sqe(&be->ring);
     if (!sqe) return -ENOSPC;
@@ -293,6 +318,9 @@ static int uring_submit_recv(IoBackend *ctx, int fd) {
 // writing to a connection the peer has closed. Without this, a broken pipe
 // would kill the entire process. With it, we get -EPIPE in cqe->res instead.
 static int uring_submit_send(IoBackend *ctx, int fd, const uint8_t *data, uint32_t len) {
+    ASSERT(ctx != nullptr, "uring_submit_send requires backend");
+    ASSERT(fd >= 0 && fd < MAX_CONNECTIONS, "send fd index out of range");
+    ASSERT(data != nullptr || len == 0, "send data pointer is null");
     auto *be = reinterpret_cast<UringBackend *>(ctx);
     struct io_uring_sqe *sqe = io_uring_get_sqe(&be->ring);
     if (!sqe) return -ENOSPC;
@@ -307,6 +335,8 @@ static int uring_submit_send(IoBackend *ctx, int fd, const uint8_t *data, uint32
 // accept_direct never installs an OS-level fd, close_direct is the only valid
 // close path — there is no OS fd to pass to regular close(2) or prep_close.
 static int uring_submit_close(IoBackend *ctx, int fd) {
+    ASSERT(ctx != nullptr, "uring_submit_close requires backend");
+    ASSERT(fd >= 0 && fd < MAX_CONNECTIONS, "close fd index out of range");
     auto *be = reinterpret_cast<UringBackend *>(ctx);
     struct io_uring_sqe *sqe = io_uring_get_sqe(&be->ring);
     if (!sqe) return -ENOSPC;
@@ -330,6 +360,8 @@ static int uring_submit_close(IoBackend *ctx, int fd) {
 // reads it asynchronously after this function returns. Encoding IGNORE in
 // user_data ensures the resulting CQE is consumed silently in uring_wait.
 static int uring_submit_nodelay(IoBackend *ctx, int fd) {
+    ASSERT(ctx != nullptr, "uring_submit_nodelay requires backend");
+    ASSERT(fd >= 0 && fd < MAX_CONNECTIONS, "nodelay fd index out of range");
     auto *be = reinterpret_cast<UringBackend *>(ctx);
     struct io_uring_sqe *sqe = io_uring_get_sqe(&be->ring);
     if (!sqe) return -ENOSPC;
@@ -351,7 +383,9 @@ static int uring_submit_nodelay(IoBackend *ctx, int fd) {
 //
 // The mask (power-of-2 wrapping) ensures the ring index stays in bounds.
 static void uring_recycle_buffer(IoBackend *ctx, uint16_t buf_id) {
+    ASSERT(ctx != nullptr, "uring_recycle_buffer requires backend");
     auto *be = reinterpret_cast<UringBackend *>(ctx);
+    ASSERT(static_cast<uint32_t>(buf_id) < be->buf_count, "buffer id out of range");
     int mask = io_uring_buf_ring_mask(be->buf_count);
     io_uring_buf_ring_add(be->buf_ring,
                           be->buf_pool + (static_cast<uint32_t>(buf_id) * be->buf_size),
@@ -366,7 +400,9 @@ static void uring_recycle_buffer(IoBackend *ctx, uint16_t buf_id) {
 // offset=added (0..N-1) for this batch and then advance tail once by N.
 // This reduces atomic tail updates compared to per-buffer recycle.
 static void uring_recycle_buffers(IoBackend *ctx, const uint16_t *buf_ids, uint32_t count) {
+    ASSERT(ctx != nullptr, "uring_recycle_buffers requires backend");
     auto *be = reinterpret_cast<UringBackend *>(ctx);
+    ASSERT(count == 0 || buf_ids != nullptr, "buffer id array must be non-null");
     if (!buf_ids || count == 0) return;
 
     int mask = io_uring_buf_ring_mask(be->buf_count);
@@ -384,6 +420,9 @@ static void uring_recycle_buffers(IoBackend *ctx, const uint16_t *buf_ids, uint3
 }
 
 static int uring_wait(IoBackend *ctx, IoCompletion *out, int max_completions) {
+    ASSERT(ctx != nullptr, "uring_wait requires backend");
+    ASSERT(out != nullptr, "uring_wait requires output buffer");
+    ASSERT(max_completions > 0, "uring_wait max_completions must be > 0");
     auto *be = reinterpret_cast<UringBackend *>(ctx);
 
         //  __kernel_timespec is the kernel-native timespec (always 64-bit tv_sec),
@@ -424,6 +463,7 @@ static int uring_wait(IoBackend *ctx, IoCompletion *out, int max_completions) {
     unsigned head;
     io_uring_for_each_cqe(&be->ring, head, cqe) {
         IoCompletion::Kind kind = decode_kind(cqe->user_data);
+        ASSERT(completion_kind_valid(kind), "decoded CQE kind is invalid");
 
                 //  IGNORE completions are internal ops (e.g., TCP_NODELAY setsockopt).
         // Always consume them from the ring; log errors but never surface to
@@ -523,6 +563,8 @@ static int uring_wait(IoBackend *ctx, IoCompletion *out, int max_completions) {
                         //  With accept_direct, cqe->res is the allocated fixed file index
             // (not an OS fd). This index is used for all subsequent recv/send/
             // close SQEs via IOSQE_FIXED_FILE, and as the conns[] table key.
+            ASSERT(cqe->res >= 0, "accept completion produced negative fd index");
+            ASSERT(cqe->res < MAX_CONNECTIONS, "accept completion fd index out of range");
             c->fd = cqe->res;
         }
 
@@ -534,6 +576,7 @@ static int uring_wait(IoBackend *ctx, IoCompletion *out, int max_completions) {
     // marking all consumed CQEs (including IGNORE) as seen. More efficient
     // than calling io_uring_cqe_seen per CQE — single atomic store.
     io_uring_cq_advance(&be->ring, static_cast<unsigned>(total_seen));
+    ASSERT(total_seen >= out_count, "CQ accounting mismatch");
 
         //  IORING_FEAT_NODROP: overflow means the kernel backlog is filling. This
     // indicates we are not draining the CQ fast enough — increase ring_size or
@@ -549,6 +592,7 @@ static int uring_wait(IoBackend *ctx, IoCompletion *out, int max_completions) {
 // resources. We then free the userspace allocations in order: the buf_ring
 // control structure, the contiguous buffer pool, and the backend struct.
 static void uring_destroy(IoBackend *ctx) {
+    ASSERT(ctx != nullptr, "uring_destroy requires backend");
     auto *be = reinterpret_cast<UringBackend *>(ctx);
     if (be->ring_initialized) io_uring_queue_exit(&be->ring);
     if (be->buf_ring) std::free(be->buf_ring);
@@ -580,6 +624,10 @@ IoOps io_uring_ops() {
 // uring_init, it gets sliced into buf_count individual buffers and registered
 // with the kernel's provided buffer ring.
 IoBackend *io_uring_backend_create(uint32_t ring_size, uint32_t buf_count, uint32_t buf_size) {
+    ASSERT(ring_size > 0, "ring_size must be non-zero");
+    ASSERT(buf_count > 0, "buf_count must be non-zero");
+    ASSERT(buf_size > 0, "buf_size must be non-zero");
+    ASSERT(is_power_of_two_u32(buf_count), "buf_count must be power of two");
     auto *be = static_cast<UringBackend *>(std::calloc(1, sizeof(UringBackend)));
     if (!be) return nullptr;
     be->ring_size = ring_size;

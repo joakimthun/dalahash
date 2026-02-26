@@ -1,12 +1,15 @@
 // main.cpp — Entry point.
 
 #include "net/server.h"
+#include "base/assert.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
 int main(int argc, char **argv) {
+    ASSERT(argc >= 0, "argc must be non-negative");
+    ASSERT(argv != nullptr || argc == 0, "argv is null with non-zero argc");
     ServerConfig config = {.port = 6379, .num_workers = 0, .store_bytes = 256ull << 20};
 
     for (int i = 1; i < argc; i++) {

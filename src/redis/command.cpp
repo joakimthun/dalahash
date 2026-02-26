@@ -1,12 +1,15 @@
 // command.cpp — Command dispatch: verb lookup, store access, response encoding.
 
 #include "command.h"
+#include "base/assert.h"
 #include <cstdio>
 #include <cstring>
 
 //  Case-insensitive argument match via clearing bit 5 (0x20): 'a'→'A', 'g'→'G'.
 // Works for ASCII letters only, which covers all Redis command verbs.
 static bool arg_matches(const RespArg *arg, const char *expected, uint32_t expected_len) {
+    ASSERT(arg != nullptr, "arg_matches requires arg");
+    ASSERT(expected != nullptr, "arg_matches requires expected literal");
     if (arg->len != expected_len) return false;
     for (uint32_t i = 0; i < expected_len; i++) {
         if ((arg->data[i] & 0xDF) != static_cast<uint8_t>(expected[i])) return false;
@@ -21,6 +24,9 @@ static uint32_t decimal_len_u32(uint32_t v) {
 }
 
 static uint32_t write_error_bounded(uint8_t *out, uint32_t out_buf_size, const char *msg) {
+    ASSERT(out != nullptr || out_buf_size == 0, "write_error_bounded null out with non-zero size");
+    ASSERT(msg != nullptr, "write_error_bounded requires error message");
+    if (!out || !msg) return 0;
     if (out_buf_size == 0) return 0;
     int n = std::snprintf(reinterpret_cast<char *>(out), out_buf_size, "-ERR %s\r\n", msg);
     if (n <= 0) return 0;
@@ -34,6 +40,14 @@ static uint32_t write_error_bounded(uint8_t *out, uint32_t out_buf_size, const c
 // available without any additional allocation until this function returns.
 uint32_t command_execute(const RespCommand *cmd, Store *store,
                          uint64_t now_ms, uint8_t *out_buf, uint32_t out_buf_size) {
+    ASSERT(cmd != nullptr, "command_execute requires command");
+    ASSERT(store != nullptr, "command_execute requires store");
+    ASSERT(out_buf != nullptr || out_buf_size == 0, "command_execute null out with non-zero size");
+    if (!cmd || !store || (!out_buf && out_buf_size > 0))
+        return 0;
+    ASSERT(cmd->argc >= 0, "command argc must be non-negative");
+    ASSERT(cmd->argc <= RESP_MAX_ARGS, "command argc exceeds parser bound");
+
     if (cmd->argc < 1) return write_error_bounded(out_buf, out_buf_size, "empty command");
 
     const RespArg *verb = &cmd->args[0];
@@ -49,6 +63,7 @@ uint32_t command_execute(const RespCommand *cmd, Store *store,
             return resp_write_null(out_buf);
         }
         uint32_t val_len = val.len;
+        ASSERT(val.data != nullptr || val_len == 0, "store returned null data for non-empty value");
         uint64_t needed = 1ull + decimal_len_u32(val_len) + 2ull + val_len + 2ull;
         if (needed > out_buf_size)
             return write_error_bounded(out_buf, out_buf_size, "response too large");

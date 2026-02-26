@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include "base/assert.h"
 #include "kv/shared_kv_store.h"
 
 #include <string_view>
@@ -69,7 +70,12 @@ inline bool store_ensure_local(Store *s) {
 
     KvStore *kv = kv_store_create(&cfg);
     if (!kv) return false;
-    kv_store_register_worker(kv, 0);
+    int register_ret = kv_store_register_worker(kv, 0);
+    ASSERT(register_ret == 0, "local store worker registration must succeed");
+    if (register_ret != 0) {
+        kv_store_destroy(kv);
+        return false;
+    }
 
     s->kv = kv;
     s->worker_id = 0;
@@ -87,6 +93,8 @@ inline void store_reset(Store *s) {
 
 inline void store_bind_shared(Store *s, KvStore *kv, uint32_t worker_id) {
     if (!s) return;
+    ASSERT(kv != nullptr, "store_bind_shared requires shared store pointer");
+    if (!kv) return;
     if (s->owns_kv && s->kv) kv_store_destroy(s->kv);
     s->kv = kv;
     s->worker_id = worker_id;
@@ -99,6 +107,7 @@ inline void store_quiescent(Store *s) {
 }
 
 inline bool store_get_at(Store *s, std::string_view key, uint64_t now_ms, StoreValueView *out) {
+    ASSERT(s != nullptr, "store_get_at requires store");
     if (!out) return false;
     out->data = nullptr;
     out->len = 0;
@@ -118,6 +127,7 @@ inline bool store_get(Store *s, std::string_view key, StoreValueView *out) {
 
 inline StoreSetStatus store_set_at(Store *s, std::string_view key, std::string_view value,
                                    uint64_t now_ms) {
+    ASSERT(s != nullptr, "store_set_at requires store");
     if (!store_ensure_local(s)) return StoreSetStatus::INVALID;
     KvSetStatus st = kv_store_set(s->kv, s->worker_id, key, value, now_ms, nullptr);
     if (st == KvSetStatus::OK) return StoreSetStatus::OK;
@@ -132,6 +142,7 @@ inline StoreSetStatus store_set(Store *s, std::string_view key, std::string_view
 inline StoreSetStatus store_set_expire_after_ms_at(Store *s, std::string_view key,
                                                    std::string_view value, uint64_t ttl_ms,
                                                    uint64_t now_ms) {
+    ASSERT(s != nullptr, "store_set_expire_after_ms_at requires store");
     if (!store_ensure_local(s)) return StoreSetStatus::INVALID;
     KvSetOptions opts = {.mode = KvExpireMode::AFTER_MS, .value_ms = ttl_ms};
     KvSetStatus st = kv_store_set(s->kv, s->worker_id, key, value, now_ms, &opts);
@@ -148,6 +159,7 @@ inline StoreSetStatus store_set_expire_after_ms(Store *s, std::string_view key,
 inline StoreSetStatus store_set_expire_at_ms_at(Store *s, std::string_view key,
                                                 std::string_view value, uint64_t at_ms,
                                                 uint64_t now_ms) {
+    ASSERT(s != nullptr, "store_set_expire_at_ms_at requires store");
     if (!store_ensure_local(s)) return StoreSetStatus::INVALID;
     KvSetOptions opts = {.mode = KvExpireMode::AT_MS, .value_ms = at_ms};
     KvSetStatus st = kv_store_set(s->kv, s->worker_id, key, value, now_ms, &opts);

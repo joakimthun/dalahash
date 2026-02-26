@@ -26,7 +26,11 @@ add_compile_options(-fno-exceptions -Wall -Wextra)
 # These are Release-only by design; Debug/sanitizer builds keep normal toolchain behavior.
 set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
 add_compile_options($<$<CONFIG:Release>:-march=native> $<$<CONFIG:Release>:-mtune=native>)
+# Debug stack traces from ASSERT() use backtrace_symbols_fd(3). `-rdynamic`
+# exports non-static symbols to the dynamic symbol table so callstacks resolve
+# to function names instead of mostly raw addresses.
 add_link_options(
+    $<$<CONFIG:Debug>:-rdynamic>
     $<$<CONFIG:Release>:-fuse-ld=lld>
     $<$<CONFIG:Release>:-march=native>
     $<$<CONFIG:Release>:-mtune=native>
@@ -61,6 +65,7 @@ find_path(URING_INCLUDE liburing.h REQUIRED)
 # Core library — all dalahash logic except main(). Linked by both the
 # executable and test targets so tests can access internal functions.
 add_library(dalahash_lib STATIC
+    src/base/assert.cpp
     src/kv/shared_kv_store.cpp
     src/redis/resp.cpp
     src/redis/command.cpp
@@ -71,6 +76,9 @@ add_library(dalahash_lib STATIC
 # PUBLIC: these include dirs and link libs propagate to anything linking dalahash_lib
 target_include_directories(dalahash_lib PUBLIC src ${URING_INCLUDE})
 target_link_libraries(dalahash_lib PUBLIC ${URING_LIB} pthread)
+target_compile_definitions(dalahash_lib PUBLIC
+    $<$<CONFIG:Debug>:DALAHASH_DEBUG_ASSERTS=1>
+)
 
 if(DALAHASH_PROTOCOL STREQUAL "redis")
     target_compile_definitions(dalahash_lib PUBLIC DALAHASH_PROTOCOL_REDIS=1)

@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include "base/assert.h"
+
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -29,6 +31,7 @@ struct Connection {
 inline int g_connection_create_fail_count = 0;
 
 inline Connection *connection_create(int fd) {
+    ASSERT(fd >= 0 && fd < MAX_CONNECTIONS, "connection fd index out of range");
     if (g_connection_create_fail_count > 0) {
         g_connection_create_fail_count--;
         return nullptr;
@@ -39,5 +42,7 @@ inline Connection *connection_create(int fd) {
 }
 
 inline void connection_destroy(Connection *conn) {
+    ASSERT(conn != nullptr, "connection_destroy requires conn");
+    if (!conn) return;
     std::free(conn);
 }

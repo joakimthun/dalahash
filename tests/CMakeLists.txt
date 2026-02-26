@@ -12,6 +12,7 @@ FetchContent_MakeAvailable(googletest)
 
 # Unit tests — RESP parser, command dispatch, smoke test
 add_executable(dalahash_tests
+    base/assert_test.cpp
     smoke_test.cpp
     kv/shared_kv_store_test.cpp
     kv/shared_kv_store_api_test.cpp
