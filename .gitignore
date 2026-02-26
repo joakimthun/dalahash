@@ -9,6 +9,5 @@ build-lsan/
 build_lsan/
 build-asan/
 build_asan/
-*.md
 *.local.json
 notes.txt
