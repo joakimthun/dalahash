@@ -28,6 +28,41 @@ static MultiBenchContext *g_ctx = nullptr;
 static std::mutex g_ctx_mu;
 static std::atomic<uint32_t> g_teardown_count{0};
 
+static uint32_t next_pow2_u32(uint32_t v) {
+    if (v <= 1) return 1;
+    v--;
+    v |= v >> 1;
+    v |= v >> 2;
+    v |= v >> 4;
+    v |= v >> 8;
+    v |= v >> 16;
+    return v + 1u;
+}
+
+static uint32_t derive_shard_count(uint32_t worker_count) {
+    uint32_t target = worker_count == 0 ? 1u : worker_count;
+    if (target > UINT32_MAX / 4u) target = UINT32_MAX / 4u;
+    target *= 4u;
+    if (target < 64u) target = 64u;
+    return next_pow2_u32(target);
+}
+
+static uint32_t derive_buckets_per_shard(uint64_t capacity_bytes, uint32_t shard_count) {
+    if (shard_count == 0) return 16u;
+
+    uint64_t total_buckets = capacity_bytes / 256u;
+    if (total_buckets < 64u) total_buckets = 64u;
+    uint64_t per_shard = total_buckets / shard_count;
+    if (per_shard < 16u) per_shard = 16u;
+    if (per_shard > static_cast<uint64_t>(UINT32_MAX / 2u)) {
+        per_shard = static_cast<uint64_t>(UINT32_MAX / 2u);
+    }
+
+    uint32_t buckets = next_pow2_u32(static_cast<uint32_t>(per_shard));
+    if (buckets <= UINT32_MAX / 2u) buckets *= 2u;
+    return buckets;
+}
+
 static void destroy_context(MultiBenchContext *ctx) {
     if (!ctx) return;
     if (ctx->store) kv_store_destroy(ctx->store);
@@ -46,10 +81,15 @@ static MultiBenchContext *create_context(uint32_t dataset_size, uint32_t key_siz
     ctx->keys = kvbench::make_corpus(dataset_size, key_size, 0x6d756c74695f31ull, true);
     ctx->values = kvbench::make_corpus(dataset_size, value_size, 0x6d756c74695f32ull, false);
 
+    const uint64_t capacity_bytes =
+        kvbench::derive_capacity_bytes(dataset_size, key_size, value_size);
+    const uint32_t shard_count = derive_shard_count(worker_count);
+    const uint32_t buckets_per_shard = derive_buckets_per_shard(capacity_bytes, shard_count);
+
     KvStoreConfig cfg = {
-        .capacity_bytes = kvbench::derive_capacity_bytes(dataset_size, key_size, value_size),
-        .shard_count = 0,
-        .buckets_per_shard = 0,
+        .capacity_bytes = capacity_bytes,
+        .shard_count = shard_count,
+        .buckets_per_shard = buckets_per_shard,
         .worker_count = worker_count,
     };
     ctx->store = kv_store_create(&cfg);
