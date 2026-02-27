@@ -10,11 +10,25 @@
 
 namespace {
 
-static void add_standard_args(benchmark::internal::Benchmark *b) {
+static void add_baseline_args(benchmark::internal::Benchmark *b) {
     b->Args({4096, 16, 64});
     b->Args({4096, 16, 256});
     b->Args({16384, 24, 128});
     b->Args({65536, 32, 256});
+}
+
+static void add_large_dataset_args(benchmark::internal::Benchmark *b) {
+    b->Args({2000000, 16, 64});
+    b->Args({4000000, 16, 64});
+    b->Args({8000000, 16, 64});
+    b->Args({2000000, 24, 128});
+    b->Args({4000000, 24, 128});
+    b->Args({8000000, 24, 128});
+}
+
+static void add_all_args(benchmark::internal::Benchmark *b) {
+    add_baseline_args(b);
+    add_large_dataset_args(b);
 }
 
 static bool parse_sizes(const benchmark::State &state, uint32_t *dataset_size,
@@ -155,8 +169,8 @@ static void BM_SharedKvSingleGetHit(benchmark::State &state) {
     state.SetBytesProcessed(static_cast<int64_t>(bytes));
 }
 
-BENCHMARK(BM_SharedKvSingleSet)->Apply(add_standard_args)->UseRealTime();
-BENCHMARK(BM_SharedKvSingleGetHit)->Apply(add_standard_args)->UseRealTime();
+BENCHMARK(BM_SharedKvSingleSet)->Apply(add_all_args)->UseRealTime();
+BENCHMARK(BM_SharedKvSingleGetHit)->Apply(add_all_args)->UseRealTime();
 
 } // namespace
 

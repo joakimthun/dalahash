@@ -28,20 +28,26 @@ Single-thread set/get:
 ./build/bench/shared_kv_single_thread_bench
 ```
 
-Multi-thread mixed scaling (80% GET / 20% SET):
+Multi-thread workloads:
 
 ```bash
 ./build/bench/shared_kv_multi_thread_bench
 ```
 
+- `Mixed80_20`: 80% GET / 20% SET
+- `Get100`: 100% GET hit path
+
 Run only one benchmark family or one argument case:
 
 ```bash
 ./build/bench/shared_kv_single_thread_bench \
-  --benchmark_filter='BM_SharedKvSingle(Set|GetHit)/4096/16/64/real_time$'
+  --benchmark_filter='BM_SharedKvSingleGetHit/2000000/16/64/real_time$'
 
 ./build/bench/shared_kv_multi_thread_bench \
-  --benchmark_filter='SharedKvMultiFixture/Mixed80_20/16384/24/128/real_time/threads:8$'
+  --benchmark_filter='SharedKvMultiFixture/Get100/4000000/24/128/real_time/threads:8$'
+
+./build/bench/shared_kv_multi_thread_bench \
+  --benchmark_filter='SharedKvMultiFixture/Mixed80_20/8000000/16/64/real_time/threads:8$'
 ```
 
 ## Configurability
@@ -58,5 +64,11 @@ Current matrix:
 - `4096, 16, 256`
 - `16384, 24, 128`
 - `65536, 32, 256`
+- `2000000, 16, 64`
+- `4000000, 16, 64`
+- `8000000, 16, 64`
+- `2000000, 24, 128`
+- `4000000, 24, 128`
+- `8000000, 24, 128`
 
 The random keys and values are deterministic and generated from fixed seeds.

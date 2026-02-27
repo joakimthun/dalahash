@@ -88,11 +88,25 @@ static bool parse_sizes(const benchmark::State &state, uint32_t *dataset_size,
     return true;
 }
 
-static void add_standard_args(benchmark::internal::Benchmark *b) {
+static void add_baseline_args(benchmark::internal::Benchmark *b) {
     b->Args({4096, 16, 64});
     b->Args({4096, 16, 256});
     b->Args({16384, 24, 128});
     b->Args({65536, 32, 256});
+}
+
+static void add_large_dataset_args(benchmark::internal::Benchmark *b) {
+    b->Args({2000000, 16, 64});
+    b->Args({4000000, 16, 64});
+    b->Args({8000000, 16, 64});
+    b->Args({2000000, 24, 128});
+    b->Args({4000000, 24, 128});
+    b->Args({8000000, 24, 128});
+}
+
+static void add_all_args(benchmark::internal::Benchmark *b) {
+    add_baseline_args(b);
+    add_large_dataset_args(b);
 }
 
 class SharedKvMultiFixture : public benchmark::Fixture {
@@ -185,8 +199,63 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, Mixed80_20)(benchmark::State &state) {
         benchmark::Counter(static_cast<double>(write_ops), benchmark::Counter::kIsRate);
 }
 
+BENCHMARK_DEFINE_F(SharedKvMultiFixture, Get100)(benchmark::State &state) {
+    if (!g_ctx || !g_ctx->store || g_ctx->keys.empty()) {
+        state.SkipWithError("multi benchmark context setup failed");
+        return;
+    }
+
+    const uint32_t worker_id = static_cast<uint32_t>(state.thread_index());
+    const uint64_t base_seed =
+        kvbench::mix_seed(0x6d756c74695f726full,
+                          static_cast<uint64_t>(g_ctx->dataset_size) ^
+                              (static_cast<uint64_t>(g_ctx->key_size) << 21u) ^
+                              (static_cast<uint64_t>(g_ctx->value_size) << 42u));
+    kvbench::XorShift64 rng(kvbench::mix_seed(base_seed, worker_id + 1u));
+
+    uint64_t read_ops = 0;
+    uint64_t bytes = 0;
+    uint32_t q_count = 0;
+    uint64_t now_ms = 1000u + worker_id;
+
+    for (auto _ : state) {
+        (void)_;
+        const uint64_t r = rng.next();
+        const uint32_t key_idx = static_cast<uint32_t>(r % g_ctx->keys.size());
+        const std::string &key = g_ctx->keys[key_idx];
+
+        KvValueView out = {};
+        KvGetStatus gs = kv_store_get(g_ctx->store, worker_id, key, now_ms, &out);
+        if (gs != KvGetStatus::HIT) {
+            state.SkipWithError("kv_store_get miss in get100 benchmark");
+            break;
+        }
+
+        benchmark::DoNotOptimize(out.data);
+        benchmark::DoNotOptimize(out.len);
+        read_ops++;
+        bytes += static_cast<uint64_t>(key.size()) + out.len;
+
+        now_ms++;
+        q_count++;
+        if ((q_count & 255u) == 0u) kv_store_quiescent(g_ctx->store, worker_id);
+    }
+
+    kv_store_quiescent(g_ctx->store, worker_id);
+    state.SetItemsProcessed(static_cast<int64_t>(read_ops));
+    state.SetBytesProcessed(static_cast<int64_t>(bytes));
+    state.counters["read_ops"] =
+        benchmark::Counter(static_cast<double>(read_ops), benchmark::Counter::kIsRate);
+    state.counters["write_ops"] = benchmark::Counter(0.0, benchmark::Counter::kIsRate);
+}
+
 BENCHMARK_REGISTER_F(SharedKvMultiFixture, Mixed80_20)
-    ->Apply(add_standard_args)
+    ->Apply(add_all_args)
+    ->ThreadRange(1, 16)
+    ->UseRealTime();
+
+BENCHMARK_REGISTER_F(SharedKvMultiFixture, Get100)
+    ->Apply(add_all_args)
     ->ThreadRange(1, 16)
     ->UseRealTime();
 
