@@ -28,3 +28,11 @@ target_link_libraries(shared_kv_multi_thread_bench PRIVATE
     dalahash_lib
     benchmark::benchmark
 )
+
+add_executable(redis_resp_bench
+    redis_resp_bench.cpp
+)
+target_link_libraries(redis_resp_bench PRIVATE
+    dalahash_lib
+    benchmark::benchmark
+)

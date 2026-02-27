@@ -1,6 +1,9 @@
-# shared_kv_store benchmarks
+# benchmarks
 
-This directory contains Google Benchmark workloads for `src/kv/shared_kv_store.*`.
+This directory contains Google Benchmark workloads for:
+
+- `src/kv/shared_kv_store.*`
+- `src/redis/resp.*`
 
 Dependency resolution:
 
@@ -17,7 +20,8 @@ cmake -B build \
   -DENABLE_BENCHMARKS=ON
 cmake --build build -j"$(nproc)" --target \
   shared_kv_single_thread_bench \
-  shared_kv_multi_thread_bench
+  shared_kv_multi_thread_bench \
+  redis_resp_bench
 ```
 
 ## Run
@@ -32,6 +36,12 @@ Multi-thread workloads:
 
 ```bash
 ./build/bench/shared_kv_multi_thread_bench
+```
+
+RESP parser/formatter microbenchmarks:
+
+```bash
+./build/bench/redis_resp_bench
 ```
 
 - `Mixed80_20`: 80% GET / 20% SET
