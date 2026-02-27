@@ -39,10 +39,10 @@ struct ProtocolWorkerState {
 };
 
 // Initialize per-worker Redis state before event loop starts.
-inline void protocol_worker_init(ProtocolWorkerState *state,
-                                 const ProtocolInitContext *ctx = nullptr) {
+inline void protocol_worker_init(ProtocolWorkerState* state, const ProtocolInitContext* ctx = nullptr) {
     ASSERT(state != nullptr, "protocol_worker_init requires state");
-    if (!state) return;
+    if (!state)
+        return;
     store_reset(&state->store);
     if (ctx && ctx->shared_store) {
         store_bind_shared(&state->store, ctx->shared_store, ctx->worker_id);
@@ -51,23 +51,22 @@ inline void protocol_worker_init(ProtocolWorkerState *state,
     }
 }
 
-inline void protocol_worker_quiescent(ProtocolWorkerState *state) {
+inline void protocol_worker_quiescent(ProtocolWorkerState* state) {
     ASSERT(state != nullptr, "protocol_worker_quiescent requires state");
-    if (!state) return;
+    if (!state)
+        return;
     store_quiescent(&state->store);
 }
 
-inline uint64_t protocol_now_ms() {
-    return kv_time_now_ms();
-}
+inline uint64_t protocol_now_ms() { return kv_time_now_ms(); }
 
 // Parse one RESP command from [data, data + len).
 // Contract delegated to resp_parse:
 //   - OK: cmd populated, consumed > 0
 //   - INCOMPLETE: consumed = 0
 //   - ERROR: malformed request
-inline ProtocolParseResult protocol_parse(const uint8_t *data, uint32_t len,
-                                          ProtocolCommand *cmd, uint32_t *consumed) {
+inline ProtocolParseResult protocol_parse(const uint8_t* data, uint32_t len, ProtocolCommand* cmd,
+                                          uint32_t* consumed) {
     ASSERT(cmd != nullptr, "protocol_parse requires cmd output");
     ASSERT(consumed != nullptr, "protocol_parse requires consumed output");
     ASSERT(data != nullptr || len == 0, "protocol_parse null input with non-zero length");
@@ -78,14 +77,12 @@ inline ProtocolParseResult protocol_parse(const uint8_t *data, uint32_t len,
 // Return value is bytes written to out_buf.
 // If command_execute reports a value > out_buf_size, worker treats this as
 // overflow and closes the connection.
-inline uint32_t protocol_execute(const ProtocolCommand *cmd,
-                                 ProtocolWorkerState *state,
-                                 uint64_t now_ms,
-                                 uint8_t *out_buf, uint32_t out_buf_size) {
+inline uint32_t protocol_execute(const ProtocolCommand* cmd, ProtocolWorkerState* state, uint64_t now_ms,
+                                 uint8_t* out_buf, uint32_t out_buf_size) {
     ASSERT(cmd != nullptr, "protocol_execute requires command");
     ASSERT(state != nullptr, "protocol_execute requires state");
-    ASSERT(out_buf != nullptr || out_buf_size == 0,
-           "protocol_execute null output with non-zero size");
-    if (!cmd || !state || (!out_buf && out_buf_size > 0)) return 0;
+    ASSERT(out_buf != nullptr || out_buf_size == 0, "protocol_execute null output with non-zero size");
+    if (!cmd || !state || (!out_buf && out_buf_size > 0))
+        return 0;
     return command_execute(cmd, &state->store, now_ms, out_buf, out_buf_size);
 }

@@ -29,7 +29,8 @@ namespace {
 static uint16_t pick_unused_port() {
     for (uint16_t port = 20000; port < 60000; port++) {
         int fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (fd < 0) return 0;
+        if (fd < 0)
+            return 0;
 
         int one = 1;
         (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
@@ -39,7 +40,7 @@ static uint16_t pick_unused_port() {
         addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
         addr.sin_port = htons(port);
 
-        if (bind(fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) == 0) {
+        if (bind(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0) {
             close(fd);
             return port;
         }
@@ -50,14 +51,13 @@ static uint16_t pick_unused_port() {
 }
 
 static std::string make_log_path(uint16_t port) {
-    return "/tmp/dalahash_echo_test_" +
-           std::to_string(getpid()) + "_" +
-           std::to_string(port) + ".log";
+    return "/tmp/dalahash_echo_test_" + std::to_string(getpid()) + "_" + std::to_string(port) + ".log";
 }
 
-static std::string read_text_file(const std::string &path) {
-    FILE *f = std::fopen(path.c_str(), "r");
-    if (!f) return {};
+static std::string read_text_file(const std::string& path) {
+    FILE* f = std::fopen(path.c_str(), "r");
+    if (!f)
+        return {};
 
     std::string out;
     char buf[512];
@@ -69,14 +69,15 @@ static std::string read_text_file(const std::string &path) {
 
 static int connect_loopback(uint16_t port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
+    if (fd < 0)
+        return -1;
 
     struct sockaddr_in addr = {};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
-    if (connect(fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0) {
+    if (connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
         close(fd);
         return -1;
     }
@@ -91,38 +92,41 @@ static void set_socket_timeouts(int fd, int sec) {
     (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 }
 
-static bool send_all(int fd, const uint8_t *data, size_t len) {
+static bool send_all(int fd, const uint8_t* data, size_t len) {
     size_t off = 0;
     while (off < len) {
         ssize_t n = send(fd, data + off, len - off, MSG_NOSIGNAL);
         if (n < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR)
+                continue;
             return false;
         }
-        if (n == 0) return false;
+        if (n == 0)
+            return false;
         off += static_cast<size_t>(n);
     }
     return true;
 }
 
-static bool recv_exact(int fd, uint8_t *out, size_t len) {
+static bool recv_exact(int fd, uint8_t* out, size_t len) {
     size_t off = 0;
     while (off < len) {
         ssize_t n = recv(fd, out + off, len - off, 0);
         if (n < 0) {
-            if (errno == EINTR) continue;
+            if (errno == EINTR)
+                continue;
             return false;
         }
-        if (n == 0) return false;
+        if (n == 0)
+            return false;
         off += static_cast<size_t>(n);
     }
     return true;
 }
 
 class DalahashServerProcess {
-public:
-    explicit DalahashServerProcess(uint16_t port)
-        : port_(port), log_path_(make_log_path(port)) {}
+  public:
+    explicit DalahashServerProcess(uint16_t port) : port_(port), log_path_(make_log_path(port)) {}
 
     ~DalahashServerProcess() {
         stop();
@@ -130,24 +134,25 @@ public:
     }
 
     bool start() {
-        if (pid_ > 0) return false;
+        if (pid_ > 0)
+            return false;
 
         std::string port_arg = std::to_string(port_);
         pid_ = fork();
-        if (pid_ < 0) return false;
+        if (pid_ < 0)
+            return false;
 
         if (pid_ == 0) {
             int log_fd = open(log_path_.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (log_fd >= 0) {
                 (void)dup2(log_fd, STDOUT_FILENO);
                 (void)dup2(log_fd, STDERR_FILENO);
-                if (log_fd > STDERR_FILENO) close(log_fd);
+                if (log_fd > STDERR_FILENO)
+                    close(log_fd);
             }
 
-            execl(DALAHASH_BINARY_PATH, DALAHASH_BINARY_PATH,
-                  "--port", port_arg.c_str(),
-                  "--workers", "1",
-                  static_cast<char *>(nullptr));
+            execl(DALAHASH_BINARY_PATH, DALAHASH_BINARY_PATH, "--port", port_arg.c_str(), "--workers", "1",
+                  static_cast<char*>(nullptr));
             _exit(127);
         }
 
@@ -155,7 +160,8 @@ public:
     }
 
     void stop() {
-        if (pid_ <= 0) return;
+        if (pid_ <= 0)
+            return;
 
         (void)kill(pid_, SIGTERM);
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
@@ -181,7 +187,7 @@ public:
 
     std::string read_log() const { return read_text_file(log_path_); }
 
-private:
+  private:
     bool wait_until_ready() {
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (std::chrono::steady_clock::now() < deadline) {
@@ -208,25 +214,30 @@ private:
 };
 
 class EchoIntegrationTest : public ::testing::Test {
-protected:
+  protected:
     void SetUp() override {
         port_ = pick_unused_port();
-        if (port_ == 0) GTEST_SKIP() << "unable to pick unused TCP port";
+        if (port_ == 0)
+            GTEST_SKIP() << "unable to pick unused TCP port";
 
         server_ = std::make_unique<DalahashServerProcess>(port_);
-        if (!server_->start()) GTEST_SKIP() << "server did not start:\n" << server_->read_log();
+        if (!server_->start())
+            GTEST_SKIP() << "server did not start:\n" << server_->read_log();
 
         client_fd_ = connect_loopback(port_);
-        if (client_fd_ < 0) GTEST_SKIP() << "failed to connect to echo server:\n" << server_->read_log();
+        if (client_fd_ < 0)
+            GTEST_SKIP() << "failed to connect to echo server:\n" << server_->read_log();
         set_socket_timeouts(client_fd_, 2);
     }
 
     void TearDown() override {
-        if (client_fd_ >= 0) close(client_fd_);
-        if (server_) server_->stop();
+        if (client_fd_ >= 0)
+            close(client_fd_);
+        if (server_)
+            server_->stop();
     }
 
-    void round_trip(const std::vector<uint8_t> &payload) {
+    void round_trip(const std::vector<uint8_t>& payload) {
         ASSERT_TRUE(send_all(client_fd_, payload.data(), payload.size()));
         std::vector<uint8_t> echoed(payload.size());
         ASSERT_TRUE(recv_exact(client_fd_, echoed.data(), echoed.size()));

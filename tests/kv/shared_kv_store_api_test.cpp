@@ -10,13 +10,11 @@
 #include <thread>
 #include <vector>
 
-TEST(SharedKvApi, CreateNullConfigFails) {
-    EXPECT_EQ(kv_store_create(nullptr), nullptr);
-}
+TEST(SharedKvApi, CreateNullConfigFails) { EXPECT_EQ(kv_store_create(nullptr), nullptr); }
 
 TEST(SharedKvApi, ZeroConfigDefaultsAreUsable) {
     KvStoreConfig cfg = {};
-    KvStore *s = kv_store_create(&cfg);
+    KvStore* s = kv_store_create(&cfg);
     ASSERT_NE(s, nullptr);
 
     EXPECT_GT(kv_store_capacity_bytes(s), 0u);
@@ -37,7 +35,7 @@ TEST(SharedKvApi, NonPowerOfTwoConfigIsAccepted) {
         .buckets_per_shard = 11,
         .worker_count = 2,
     };
-    KvStore *s = kv_store_create(&cfg);
+    KvStore* s = kv_store_create(&cfg);
     ASSERT_NE(s, nullptr);
     ASSERT_EQ(kv_store_register_worker(s, 0), 0);
     ASSERT_EQ(kv_store_register_worker(s, 1), 0);
@@ -57,7 +55,7 @@ TEST(SharedKvApi, RegisterWorkerRangeValidation) {
         .buckets_per_shard = 64,
         .worker_count = 2,
     };
-    KvStore *s = kv_store_create(&cfg);
+    KvStore* s = kv_store_create(&cfg);
     ASSERT_NE(s, nullptr);
 
     EXPECT_EQ(kv_store_register_worker(s, 0), 0);
@@ -75,7 +73,7 @@ TEST(SharedKvApi, QuiescentInvalidWorkerIsNoop) {
         .buckets_per_shard = 64,
         .worker_count = 1,
     };
-    KvStore *s = kv_store_create(&cfg);
+    KvStore* s = kv_store_create(&cfg);
     ASSERT_NE(s, nullptr);
     ASSERT_EQ(kv_store_register_worker(s, 0), 0);
     ASSERT_EQ(kv_store_set(s, 0, "k", "v", 100, nullptr), KvSetStatus::OK);
@@ -110,7 +108,7 @@ TEST(SharedKvApi, EmptyKeyAndValueRoundTrip) {
         .buckets_per_shard = 64,
         .worker_count = 1,
     };
-    KvStore *s = kv_store_create(&cfg);
+    KvStore* s = kv_store_create(&cfg);
     ASSERT_NE(s, nullptr);
     ASSERT_EQ(kv_store_register_worker(s, 0), 0);
 
@@ -129,12 +127,13 @@ TEST(SharedKvApi, BinaryKeyAndValueRoundTrip) {
         .buckets_per_shard = 64,
         .worker_count = 1,
     };
-    KvStore *s = kv_store_create(&cfg);
+    KvStore* s = kv_store_create(&cfg);
     ASSERT_NE(s, nullptr);
     ASSERT_EQ(kv_store_register_worker(s, 0), 0);
 
     std::string key = std::string("k", 1) + std::string("\0", 1) + std::string("y", 1);
-    std::string value = std::string("v", 1) + std::string("\0", 1) + std::string("\n", 1) + std::string("x", 1);
+    std::string value =
+        std::string("v", 1) + std::string("\0", 1) + std::string("\n", 1) + std::string("x", 1);
 
     EXPECT_EQ(kv_store_set(s, 0, key, value, 10, nullptr), KvSetStatus::OK);
     KvValueView out = {};
@@ -152,7 +151,7 @@ TEST(SharedKvApi, RegisterWorkerIsIdempotent) {
         .buckets_per_shard = 64,
         .worker_count = 1,
     };
-    KvStore *s = kv_store_create(&cfg);
+    KvStore* s = kv_store_create(&cfg);
     ASSERT_NE(s, nullptr);
 
     EXPECT_EQ(kv_store_register_worker(s, 0), 0);
@@ -173,12 +172,12 @@ TEST(SharedKvApi, GetMissResetsOutputView) {
         .buckets_per_shard = 64,
         .worker_count = 1,
     };
-    KvStore *s = kv_store_create(&cfg);
+    KvStore* s = kv_store_create(&cfg);
     ASSERT_NE(s, nullptr);
     ASSERT_EQ(kv_store_register_worker(s, 0), 0);
 
     KvValueView out = {
-        .data = reinterpret_cast<const uint8_t *>("abc"),
+        .data = reinterpret_cast<const uint8_t*>("abc"),
         .len = 99,
     };
     EXPECT_EQ(kv_store_get(s, 0, "missing", 1, &out), KvGetStatus::MISS);
@@ -195,7 +194,7 @@ TEST(SharedKvApi, UnregisteredWorkerRejected) {
         .buckets_per_shard = 64,
         .worker_count = 2,
     };
-    KvStore *s = kv_store_create(&cfg);
+    KvStore* s = kv_store_create(&cfg);
     ASSERT_NE(s, nullptr);
     ASSERT_EQ(kv_store_register_worker(s, 0), 0);
 
@@ -215,7 +214,7 @@ TEST(SharedKvApi, OutOfRangeWorkerIdsRejected) {
         .buckets_per_shard = 64,
         .worker_count = 1,
     };
-    KvStore *s = kv_store_create(&cfg);
+    KvStore* s = kv_store_create(&cfg);
     ASSERT_NE(s, nullptr);
     ASSERT_EQ(kv_store_register_worker(s, 0), 0);
 
@@ -236,7 +235,7 @@ TEST(SharedKvApi, TtlAfterMsZeroExpiresImmediately) {
         .buckets_per_shard = 64,
         .worker_count = 1,
     };
-    KvStore *s = kv_store_create(&cfg);
+    KvStore* s = kv_store_create(&cfg);
     ASSERT_NE(s, nullptr);
     ASSERT_EQ(kv_store_register_worker(s, 0), 0);
 
@@ -256,7 +255,7 @@ TEST(SharedKvApi, TtlAtBoundary) {
         .buckets_per_shard = 64,
         .worker_count = 1,
     };
-    KvStore *s = kv_store_create(&cfg);
+    KvStore* s = kv_store_create(&cfg);
     ASSERT_NE(s, nullptr);
     ASSERT_EQ(kv_store_register_worker(s, 0), 0);
 
@@ -277,7 +276,7 @@ TEST(SharedKvApi, TtlAfterOverflowSaturatesToMaxTimestamp) {
         .buckets_per_shard = 64,
         .worker_count = 1,
     };
-    KvStore *s = kv_store_create(&cfg);
+    KvStore* s = kv_store_create(&cfg);
     ASSERT_NE(s, nullptr);
     ASSERT_EQ(kv_store_register_worker(s, 0), 0);
 
@@ -299,7 +298,7 @@ TEST(SharedKvApi, TtlAtPastTimestampIsImmediatelyExpired) {
         .buckets_per_shard = 64,
         .worker_count = 1,
     };
-    KvStore *s = kv_store_create(&cfg);
+    KvStore* s = kv_store_create(&cfg);
     ASSERT_NE(s, nullptr);
     ASSERT_EQ(kv_store_register_worker(s, 0), 0);
 
@@ -319,7 +318,7 @@ TEST(SharedKvApi, OversizedValueReturnsOOM) {
         .buckets_per_shard = 16,
         .worker_count = 1,
     };
-    KvStore *s = kv_store_create(&cfg);
+    KvStore* s = kv_store_create(&cfg);
     ASSERT_NE(s, nullptr);
     ASSERT_EQ(kv_store_register_worker(s, 0), 0);
 
@@ -336,7 +335,7 @@ TEST(SharedKvApi, ExpiredKeyCanBeReinserted) {
         .buckets_per_shard = 64,
         .worker_count = 1,
     };
-    KvStore *s = kv_store_create(&cfg);
+    KvStore* s = kv_store_create(&cfg);
     ASSERT_NE(s, nullptr);
     ASSERT_EQ(kv_store_register_worker(s, 0), 0);
 
@@ -359,7 +358,7 @@ TEST(SharedKvApi, LiveBytesRespondToOverwriteSizeChanges) {
         .buckets_per_shard = 64,
         .worker_count = 1,
     };
-    KvStore *s = kv_store_create(&cfg);
+    KvStore* s = kv_store_create(&cfg);
     ASSERT_NE(s, nullptr);
     ASSERT_EQ(kv_store_register_worker(s, 0), 0);
 
@@ -386,7 +385,7 @@ TEST(SharedKvApi, ExplicitNoneOptionMatchesNullOptions) {
         .buckets_per_shard = 64,
         .worker_count = 1,
     };
-    KvStore *s = kv_store_create(&cfg);
+    KvStore* s = kv_store_create(&cfg);
     ASSERT_NE(s, nullptr);
     ASSERT_EQ(kv_store_register_worker(s, 0), 0);
 

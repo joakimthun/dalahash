@@ -20,7 +20,7 @@ static SimIoBackend run_worker_sim(std::vector<IoCompletion> events) {
     config.cpu_id = 0;
     config.port = 0;
     config.ops = sim_io_ops();
-    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
     config.running = &running;
     config.skip_setup = true;
     config.listen_fd = 0;
@@ -68,7 +68,7 @@ TEST(EchoDST, BinaryPayload) {
     events.push_back(sim_recv(&sim_setup, 10, payload, static_cast<uint32_t>(sizeof(payload))));
 
     SimIoBackend result = run_worker_sim(events);
-    std::string expected(reinterpret_cast<const char *>(payload), sizeof(payload));
+    std::string expected(reinterpret_cast<const char*>(payload), sizeof(payload));
     EXPECT_EQ(result.sent_data[10], expected);
 }
 

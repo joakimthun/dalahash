@@ -22,7 +22,7 @@ struct KvStoreInternalStats {
 };
 
 // Returns true when the active implementation exposes internal counters.
-bool kv_store_internal_stats_snapshot(const KvStore *store, KvStoreInternalStats *out);
+bool kv_store_internal_stats_snapshot(const KvStore* store, KvStoreInternalStats* out);
 
 // Resets internal counters when supported by the active implementation.
-bool kv_store_internal_stats_reset(KvStore *store);
+bool kv_store_internal_stats_reset(KvStore* store);

@@ -22,7 +22,7 @@ struct ProtocolInitContext;
 // data points into worker-provided parse buffer and is consumed immediately
 // by protocol_execute in the same loop iteration.
 struct ProtocolCommand {
-    const uint8_t *data;
+    const uint8_t* data;
     uint32_t len;
 };
 
@@ -38,14 +38,11 @@ static constexpr ProtocolParseResult PROTOCOL_PARSE_ERROR = ProtocolParseResult:
 struct ProtocolWorkerState {};
 
 // No-op initializer required by protocol.h contract.
-inline void protocol_worker_init(ProtocolWorkerState *,
-                                 const ProtocolInitContext * = nullptr) {}
+inline void protocol_worker_init(ProtocolWorkerState*, const ProtocolInitContext* = nullptr) {}
 
-inline void protocol_worker_quiescent(ProtocolWorkerState *) {}
+inline void protocol_worker_quiescent(ProtocolWorkerState*) {}
 
-inline uint64_t protocol_now_ms() {
-    return 0;
-}
+inline uint64_t protocol_now_ms() { return 0; }
 
 // Parse one echo command from [data, data + len).
 //
@@ -53,13 +50,15 @@ inline uint64_t protocol_now_ms() {
 //   - len > 0: return OK, command is the full span, consumed=len.
 //   - len == 0: return INCOMPLETE so worker preserves state and waits for more.
 //   - invalid args (null cmd/consumed or null data with len>0): ERROR.
-inline ProtocolParseResult protocol_parse(const uint8_t *data, uint32_t len,
-                                          ProtocolCommand *cmd, uint32_t *consumed) {
+inline ProtocolParseResult protocol_parse(const uint8_t* data, uint32_t len, ProtocolCommand* cmd,
+                                          uint32_t* consumed) {
     ASSERT(cmd != nullptr, "echo protocol_parse requires cmd output");
     ASSERT(consumed != nullptr, "echo protocol_parse requires consumed output");
     ASSERT(data != nullptr || len == 0, "echo protocol_parse null data with non-zero length");
-    if (!cmd || !consumed) return PROTOCOL_PARSE_ERROR;
-    if (!data && len > 0) return PROTOCOL_PARSE_ERROR;
+    if (!cmd || !consumed)
+        return PROTOCOL_PARSE_ERROR;
+    if (!data && len > 0)
+        return PROTOCOL_PARSE_ERROR;
     if (len == 0) {
         *consumed = 0;
         return PROTOCOL_PARSE_INCOMPLETE;
@@ -77,15 +76,15 @@ inline ProtocolParseResult protocol_parse(const uint8_t *data, uint32_t len,
 //   - If cmd->len exceeds out_buf_size, return out_buf_size + 1 as sentinel.
 //   - worker.cpp treats any return > out_buf_size as fatal overflow and closes
 //     the connection.
-inline uint32_t protocol_execute(const ProtocolCommand *cmd,
-                                 ProtocolWorkerState *,
-                                 uint64_t,
-                                 uint8_t *out_buf, uint32_t out_buf_size) {
+inline uint32_t protocol_execute(const ProtocolCommand* cmd, ProtocolWorkerState*, uint64_t, uint8_t* out_buf,
+                                 uint32_t out_buf_size) {
     ASSERT(cmd != nullptr, "echo protocol_execute requires command");
-    ASSERT(out_buf != nullptr || out_buf_size == 0,
-           "echo protocol_execute null output with non-zero size");
-    if (!cmd) return 0;
-    if (cmd->len > out_buf_size) return out_buf_size + 1;
-    if (cmd->len > 0) std::memcpy(out_buf, cmd->data, cmd->len);
+    ASSERT(out_buf != nullptr || out_buf_size == 0, "echo protocol_execute null output with non-zero size");
+    if (!cmd)
+        return 0;
+    if (cmd->len > out_buf_size)
+        return out_buf_size + 1;
+    if (cmd->len > 0)
+        std::memcpy(out_buf, cmd->data, cmd->len);
     return cmd->len;
 }

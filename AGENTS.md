@@ -22,6 +22,7 @@ Echo mode:
 
 - Use cmake.
 - Use clang-21 to compile.
+- Use `clang-format-21` (or `clang-format` if it resolves to LLVM 21) with the repo-root `.clang-format` for all C++ source/header changes.
 - Tests should be written with gtest.
 - Use C++23 (`CMAKE_CXX_STANDARD 23`).
 - Do not use exceptions for error handling (`-fno-exceptions`).
@@ -31,6 +32,7 @@ Echo mode:
 - Use `ASSERT(...)` / `ASSERT_FMT(...)` for internal invariants that must always hold.
 - When adding new invariants, add debug asserts at the point of assumption in `src/`.
 - Keep external input/IO/runtime error handling as normal return/error paths; assertions are for logic/state invariants.
+- After any C++ code or comment change, run formatting before handing work off; code and comments must match the root `.clang-format`.
 
 ## Comments
 
@@ -43,7 +45,7 @@ Echo mode:
 
 ```bash
 # Core build/runtime deps (Ubuntu/Debian names)
-sudo apt install cmake clang-21 liburing-dev
+sudo apt install cmake clang-21 clang-format-21 liburing-dev
 
 # Needed for real network integration tests and manual Redis-client checks
 sudo apt install redis-tools
@@ -64,6 +66,16 @@ cmake --build build -j$(nproc)
 Protocol selection is compile-time via CMake cache var:
 - `-DDALAHASH_PROTOCOL=redis` (default)
 - `-DDALAHASH_PROTOCOL=echo`
+
+## Formatting
+
+```bash
+# Format all C/C++ source and header files tracked by the project
+cmake --build build --target format
+
+# Format specific files directly
+clang-format-21 -i src/foo.cpp src/foo.h
+```
 
 ## Run Server (all supported CLI modes)
 

@@ -10,12 +10,12 @@
 #include <string>
 
 // Mirrors worker's handle_recv: parse selected protocol, execute, return response.
-static std::string process_recv(Connection *conn, const uint8_t *data, uint32_t len,
-                                ProtocolWorkerState *protocol_state) {
+static std::string process_recv(Connection* conn, const uint8_t* data, uint32_t len,
+                                ProtocolWorkerState* protocol_state) {
     std::string response;
     uint8_t response_buf[65536];
 
-    const uint8_t *parse_buf;
+    const uint8_t* parse_buf;
     uint32_t parse_len;
     uint8_t combined[16384 + 4096];
 
@@ -39,9 +39,9 @@ static std::string process_recv(Connection *conn, const uint8_t *data, uint32_t 
         uint32_t consumed = 0;
         auto result = protocol_parse(parse_buf + offset, parse_len - offset, &cmd, &consumed);
         if (result == PROTOCOL_PARSE_OK) {
-            uint32_t n = protocol_execute(&cmd, protocol_state, protocol_now_ms(),
-                                          response_buf, sizeof(response_buf));
-            response.append(reinterpret_cast<char *>(response_buf), n);
+            uint32_t n =
+                protocol_execute(&cmd, protocol_state, protocol_now_ms(), response_buf, sizeof(response_buf));
+            response.append(reinterpret_cast<char*>(response_buf), n);
             offset += consumed;
         } else if (result == PROTOCOL_PARSE_INCOMPLETE) {
             uint32_t remaining = parse_len - offset;
@@ -59,30 +59,37 @@ static std::string process_recv(Connection *conn, const uint8_t *data, uint32_t 
 TEST(DST, SetThenGet) {
     ProtocolWorkerState state = {};
     protocol_worker_init(&state);
-    Connection *conn = connection_create(10);
+    Connection* conn = connection_create(10);
     std::string set_data = "*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n";
-    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(set_data.data()), static_cast<uint32_t>(set_data.size()), &state), "+OK\r\n");
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t*>(set_data.data()),
+                           static_cast<uint32_t>(set_data.size()), &state),
+              "+OK\r\n");
     std::string get_data = "*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n";
-    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(get_data.data()), static_cast<uint32_t>(get_data.size()), &state), "$3\r\nbar\r\n");
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t*>(get_data.data()),
+                           static_cast<uint32_t>(get_data.size()), &state),
+              "$3\r\nbar\r\n");
     connection_destroy(conn);
 }
 
 TEST(DST, GetMiss) {
     ProtocolWorkerState state = {};
     protocol_worker_init(&state);
-    Connection *conn = connection_create(10);
+    Connection* conn = connection_create(10);
     std::string data = "*2\r\n$3\r\nGET\r\n$7\r\nmissing\r\n";
-    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(data.data()), static_cast<uint32_t>(data.size()), &state), "$-1\r\n");
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t*>(data.data()),
+                           static_cast<uint32_t>(data.size()), &state),
+              "$-1\r\n");
     connection_destroy(conn);
 }
 
 TEST(DST, PipelinedCommands) {
     ProtocolWorkerState state = {};
     protocol_worker_init(&state);
-    Connection *conn = connection_create(10);
+    Connection* conn = connection_create(10);
     std::string data = "*3\r\n$3\r\nSET\r\n$1\r\na\r\n$1\r\n1\r\n"
                        "*2\r\n$3\r\nGET\r\n$1\r\na\r\n";
-    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(data.data()), static_cast<uint32_t>(data.size()), &state),
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t*>(data.data()),
+                           static_cast<uint32_t>(data.size()), &state),
               "+OK\r\n$1\r\n1\r\n");
     connection_destroy(conn);
 }
@@ -90,24 +97,28 @@ TEST(DST, PipelinedCommands) {
 TEST(DST, PartialReassembly) {
     ProtocolWorkerState state = {};
     protocol_worker_init(&state);
-    Connection *conn = connection_create(10);
+    Connection* conn = connection_create(10);
     std::string full = "*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n";
     size_t split = 15;
 
-    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(full.data()), static_cast<uint32_t>(split), &state), "");
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t*>(full.data()), static_cast<uint32_t>(split),
+                           &state),
+              "");
     EXPECT_GT(conn->input_len, 0u);
 
-    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(full.data()) + split,
-                           static_cast<uint32_t>(full.size() - split), &state), "+OK\r\n");
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t*>(full.data()) + split,
+                           static_cast<uint32_t>(full.size() - split), &state),
+              "+OK\r\n");
     connection_destroy(conn);
 }
 
 TEST(DST, ProtocolError) {
     ProtocolWorkerState state = {};
     protocol_worker_init(&state);
-    Connection *conn = connection_create(10);
+    Connection* conn = connection_create(10);
     std::string bad = "GARBAGE\r\n";
-    process_recv(conn, reinterpret_cast<const uint8_t *>(bad.data()), static_cast<uint32_t>(bad.size()), &state);
+    process_recv(conn, reinterpret_cast<const uint8_t*>(bad.data()), static_cast<uint32_t>(bad.size()),
+                 &state);
     EXPECT_TRUE(conn->closing);
     connection_destroy(conn);
 }
@@ -115,18 +126,18 @@ TEST(DST, ProtocolError) {
 TEST(DST, SimBackendCapturesSend) {
     SimIoBackend sim;
     IoOps ops = sim_io_ops();
-    ops.submit_send(reinterpret_cast<IoBackend *>(&sim), 42, reinterpret_cast<const uint8_t *>("+OK\r\n"), 5);
+    ops.submit_send(reinterpret_cast<IoBackend*>(&sim), 42, reinterpret_cast<const uint8_t*>("+OK\r\n"), 5);
     EXPECT_EQ(sim.sent_data[42], "+OK\r\n");
 }
 
 TEST(DST, SimBackendTracksOperations) {
     SimIoBackend sim;
     IoOps ops = sim_io_ops();
-    ops.submit_accept(reinterpret_cast<IoBackend *>(&sim), 5);
+    ops.submit_accept(reinterpret_cast<IoBackend*>(&sim), 5);
     EXPECT_TRUE(sim.accept_armed);
-    ops.submit_recv(reinterpret_cast<IoBackend *>(&sim), 10);
+    ops.submit_recv(reinterpret_cast<IoBackend*>(&sim), 10);
     EXPECT_EQ(sim.recv_armed[0], 10);
-    ops.submit_close(reinterpret_cast<IoBackend *>(&sim), 10);
+    ops.submit_close(reinterpret_cast<IoBackend*>(&sim), 10);
     EXPECT_EQ(sim.closed_fds[0], 10);
 }
 
@@ -138,7 +149,7 @@ TEST(DST, SimBackendWait) {
     sim.pending.push_back(sim_recv(&sim, 10, data.data(), static_cast<uint32_t>(data.size())));
 
     IoCompletion out[16];
-    int n = ops.wait(reinterpret_cast<IoBackend *>(&sim), out, 16);
+    int n = ops.wait(reinterpret_cast<IoBackend*>(&sim), out, 16);
     EXPECT_EQ(n, 2);
     EXPECT_EQ(out[0].kind, IoCompletion::ACCEPT);
     EXPECT_EQ(out[1].kind, IoCompletion::RECV);
@@ -147,31 +158,32 @@ TEST(DST, SimBackendWait) {
 TEST(DST, DeepPipelineCoalesced) {
     SimIoBackend sim;
     IoOps ops = sim_io_ops();
-    auto *ctx = reinterpret_cast<IoBackend *>(&sim);
+    auto* ctx = reinterpret_cast<IoBackend*>(&sim);
 
     // Build 10 pipelined PINGs.
     std::string pings;
-    for (int i = 0; i < 10; i++) pings += "*1\r\n$4\r\nPING\r\n";
+    for (int i = 0; i < 10; i++)
+        pings += "*1\r\n$4\r\nPING\r\n";
 
     sim.pending.push_back(sim_accept(10));
     sim.pending.push_back(sim_recv(&sim, 10, pings.data(), static_cast<uint32_t>(pings.size())));
 
     // Drive completions through worker_run.
-    Connection *conns[MAX_CONNECTIONS] = {};
+    Connection* conns[MAX_CONNECTIONS] = {};
     ProtocolWorkerState protocol_state = {};
     protocol_worker_init(&protocol_state);
     IoCompletion completions[256];
 
     int n = ops.wait(ctx, completions, 256);
     for (int i = 0; i < n; i++) {
-        IoCompletion *c = &completions[i];
+        IoCompletion* c = &completions[i];
         if (c->kind == IoCompletion::ACCEPT) {
-            Connection *conn = connection_create(c->fd);
+            Connection* conn = connection_create(c->fd);
             conns[c->fd] = conn;
         }
     }
 
-        //  Process the recv through the real code path — but we can't call
+    //  Process the recv through the real code path — but we can't call
     // handle_recv directly (static). Phase 5 adds integration tests via
     // worker_run. For now, verify via sim backend send capture.
     // Push recv event again so sim_wait returns it.
@@ -182,9 +194,9 @@ TEST(DST, DeepPipelineCoalesced) {
     n = ops.wait(ctx, completions, 256);
 
     // Manually exercise the pipeline logic matching worker.cpp handle_recv.
-    IoCompletion *comp = &completions[0];
-    Connection *conn = conns[10];
-    const uint8_t *parse_buf = comp->buf;
+    IoCompletion* comp = &completions[0];
+    Connection* conn = conns[10];
+    const uint8_t* parse_buf = comp->buf;
     uint32_t parse_len = comp->buf_len;
     uint32_t offset = 0;
     uint8_t response[65536];
@@ -196,8 +208,8 @@ TEST(DST, DeepPipelineCoalesced) {
         auto result = protocol_parse(parse_buf + offset, parse_len - offset, &cmd, &consumed);
         if (result == PROTOCOL_PARSE_OK) {
             uint32_t cap = 65536 - resp_offset;
-            uint32_t resp_len = protocol_execute(&cmd, &protocol_state, protocol_now_ms(),
-                                                 response + resp_offset, cap);
+            uint32_t resp_len =
+                protocol_execute(&cmd, &protocol_state, protocol_now_ms(), response + resp_offset, cap);
             resp_offset += resp_len;
             offset += consumed;
         } else {
@@ -207,8 +219,9 @@ TEST(DST, DeepPipelineCoalesced) {
 
     // All 10 PINGs should produce a single coalesced response.
     std::string expected;
-    for (int i = 0; i < 10; i++) expected += "+PONG\r\n";
-    EXPECT_EQ(std::string(reinterpret_cast<char *>(response), resp_offset), expected);
+    for (int i = 0; i < 10; i++)
+        expected += "+PONG\r\n";
+    EXPECT_EQ(std::string(reinterpret_cast<char*>(response), resp_offset), expected);
 
     // Verify it would be 1 send call (resp_offset > 0 → one submit_send).
     sim.sent_data.clear();
@@ -224,11 +237,17 @@ TEST(DST, MultipleConnections) {
     Connection *c1 = connection_create(10), *c2 = connection_create(11);
     std::string s1 = "*3\r\n$3\r\nSET\r\n$2\r\nk1\r\n$2\r\nv1\r\n";
     std::string s2 = "*3\r\n$3\r\nSET\r\n$2\r\nk2\r\n$2\r\nv2\r\n";
-    EXPECT_EQ(process_recv(c1, reinterpret_cast<const uint8_t *>(s1.data()), static_cast<uint32_t>(s1.size()), &state), "+OK\r\n");
-    EXPECT_EQ(process_recv(c2, reinterpret_cast<const uint8_t *>(s2.data()), static_cast<uint32_t>(s2.size()), &state), "+OK\r\n");
+    EXPECT_EQ(process_recv(c1, reinterpret_cast<const uint8_t*>(s1.data()), static_cast<uint32_t>(s1.size()),
+                           &state),
+              "+OK\r\n");
+    EXPECT_EQ(process_recv(c2, reinterpret_cast<const uint8_t*>(s2.data()), static_cast<uint32_t>(s2.size()),
+                           &state),
+              "+OK\r\n");
 
     std::string g1 = "*2\r\n$3\r\nGET\r\n$2\r\nk1\r\n";
-    EXPECT_EQ(process_recv(c2, reinterpret_cast<const uint8_t *>(g1.data()), static_cast<uint32_t>(g1.size()), &state), "$2\r\nv1\r\n");
+    EXPECT_EQ(process_recv(c2, reinterpret_cast<const uint8_t*>(g1.data()), static_cast<uint32_t>(g1.size()),
+                           &state),
+              "$2\r\nv1\r\n");
     connection_destroy(c1);
     connection_destroy(c2);
 }
@@ -246,7 +265,7 @@ static SimIoBackend run_worker_sim(std::vector<IoCompletion> events) {
     config.cpu_id = 0;
     config.port = 0;
     config.ops = sim_io_ops();
-    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
     config.running = &running;
     config.skip_setup = true;
     config.listen_fd = 0;
@@ -283,7 +302,8 @@ TEST(DSTIntegration, SetGetViaWorkerRun) {
 TEST(DSTIntegration, PipelinedPingsViaWorkerRun) {
     SimIoBackend sim_setup;
     std::string pings;
-    for (int i = 0; i < 10; i++) pings += "*1\r\n$4\r\nPING\r\n";
+    for (int i = 0; i < 10; i++)
+        pings += "*1\r\n$4\r\nPING\r\n";
 
     std::vector<IoCompletion> events;
     events.push_back(sim_accept(10));
@@ -292,7 +312,8 @@ TEST(DSTIntegration, PipelinedPingsViaWorkerRun) {
     SimIoBackend result = run_worker_sim(events);
 
     std::string expected;
-    for (int i = 0; i < 10; i++) expected += "+PONG\r\n";
+    for (int i = 0; i < 10; i++)
+        expected += "+PONG\r\n";
     EXPECT_EQ(result.sent_data[10], expected);
     // Coalesced into 1 send call.
     EXPECT_EQ(result.send_call_count, 1);
@@ -320,14 +341,17 @@ TEST(DSTIntegration, BufferExhaustionRearms) {
     // recv_armed should contain fd 10 (the rearm).
     bool rearmed = false;
     for (int fd : result.recv_armed) {
-        if (fd == 10) { rearmed = true; break; }
+        if (fd == 10) {
+            rearmed = true;
+            break;
+        }
     }
     EXPECT_TRUE(rearmed);
 }
 
 TEST(DSTIntegration, AcceptRearmOnSQFull) {
     SimIoBackend sim_setup;
-        //  First accept will trigger submit_recv which will succeed.
+    //  First accept will trigger submit_recv which will succeed.
     // But make the multishot accept terminate (more=false) and have
     // submit_accept fail once.
     IoCompletion accept_nomore = sim_accept(10);
@@ -348,7 +372,7 @@ TEST(DSTIntegration, AcceptRearmOnSQFull) {
     WorkerConfig config = {};
     config.cpu_id = 0;
     config.ops = sim_io_ops();
-    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
     config.running = &running;
     config.skip_setup = true;
     config.listen_fd = 0;
@@ -374,7 +398,7 @@ TEST(DSTIntegration, RecvFailClosesConnection) {
     WorkerConfig config = {};
     config.cpu_id = 0;
     config.ops = sim_io_ops();
-    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
     config.running = &running;
     config.skip_setup = true;
     config.listen_fd = 0;
@@ -384,7 +408,10 @@ TEST(DSTIntegration, RecvFailClosesConnection) {
     // Connection fd 10 should have been closed.
     bool was_closed = false;
     for (int fd : sim.closed_fds) {
-        if (fd == 10) { was_closed = true; break; }
+        if (fd == 10) {
+            was_closed = true;
+            break;
+        }
     }
     EXPECT_TRUE(was_closed);
 }
@@ -397,7 +424,8 @@ TEST(DSTIntegration, PartialReassemblyViaWorkerRun) {
     std::vector<IoCompletion> events;
     events.push_back(sim_accept(10));
     events.push_back(sim_recv(&sim_setup, 10, full.data(), static_cast<uint32_t>(split)));
-    events.push_back(sim_recv(&sim_setup, 10, full.data() + split, static_cast<uint32_t>(full.size() - split)));
+    events.push_back(
+        sim_recv(&sim_setup, 10, full.data() + split, static_cast<uint32_t>(full.size() - split)));
 
     SimIoBackend result = run_worker_sim(events);
     EXPECT_EQ(result.sent_data[10], "+OK\r\n");
@@ -412,7 +440,7 @@ TEST(DSTIntegration, AcceptInitialArmFailureRetries) {
     WorkerConfig config = {};
     config.cpu_id = 0;
     config.ops = sim_io_ops();
-    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
     config.running = &running;
     config.skip_setup = true;
     config.listen_fd = 0;
@@ -444,8 +472,8 @@ TEST(DSTIntegration, AcceptErrorDoesNotCloseConnectionAtListenFdIndex) {
 
     IoCompletion accept_error = {};
     accept_error.kind = IoCompletion::ACCEPT;
-    accept_error.fd = 0;         // listen fd in skip_setup mode
-    accept_error.result = -EIO;  // accept failure
+    accept_error.fd = 0;        // listen fd in skip_setup mode
+    accept_error.result = -EIO; // accept failure
     accept_error.buf = nullptr;
     accept_error.buf_len = 0;
     accept_error.buf_id = 0;
@@ -499,7 +527,7 @@ TEST(DSTIntegration, SendBuffersOwnedAcrossAsyncCompletion) {
     WorkerConfig config = {};
     config.cpu_id = 0;
     config.ops = sim_io_ops();
-    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
     config.running = &running;
     config.skip_setup = true;
     config.listen_fd = 0;
@@ -524,7 +552,7 @@ TEST(DSTIntegration, PartialSendResubmitsRemainingBytes) {
     WorkerConfig config = {};
     config.cpu_id = 0;
     config.ops = sim_io_ops();
-    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
     config.running = &running;
     config.skip_setup = true;
     config.listen_fd = 0;
@@ -551,7 +579,10 @@ TEST(DSTIntegration, ReassemblyOverflowClosesConnection) {
 
     bool was_closed = false;
     for (int fd : result.closed_fds) {
-        if (fd == 10) { was_closed = true; break; }
+        if (fd == 10) {
+            was_closed = true;
+            break;
+        }
     }
     EXPECT_TRUE(was_closed);
 }
@@ -562,7 +593,7 @@ TEST(DST, EmptyRecv) {
     // recv with 0 bytes of data (buf non-null but len=0).
     ProtocolWorkerState state = {};
     protocol_worker_init(&state);
-    Connection *conn = connection_create(10);
+    Connection* conn = connection_create(10);
     uint8_t dummy = 0;
     std::string result = process_recv(conn, &dummy, 0, &state);
     EXPECT_EQ(result, "");
@@ -574,20 +605,23 @@ TEST(DST, MultiplePartialReassemblies) {
     // Split a command into 3 chunks across recvs.
     ProtocolWorkerState state = {};
     protocol_worker_init(&state);
-    Connection *conn = connection_create(10);
+    Connection* conn = connection_create(10);
     std::string full = "*3\r\n$3\r\nSET\r\n$3\r\nfoo\r\n$3\r\nbar\r\n";
     size_t s1 = 5, s2 = 15;
 
-    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(full.data()),
-                           static_cast<uint32_t>(s1), &state), "");
+    EXPECT_EQ(
+        process_recv(conn, reinterpret_cast<const uint8_t*>(full.data()), static_cast<uint32_t>(s1), &state),
+        "");
     EXPECT_GT(conn->input_len, 0u);
 
-    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(full.data()) + s1,
-                           static_cast<uint32_t>(s2 - s1), &state), "");
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t*>(full.data()) + s1,
+                           static_cast<uint32_t>(s2 - s1), &state),
+              "");
     EXPECT_GT(conn->input_len, 0u);
 
-    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(full.data()) + s2,
-                           static_cast<uint32_t>(full.size() - s2), &state), "+OK\r\n");
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t*>(full.data()) + s2,
+                           static_cast<uint32_t>(full.size() - s2), &state),
+              "+OK\r\n");
     connection_destroy(conn);
 }
 
@@ -595,13 +629,12 @@ TEST(DST, PipelinedMixedCommands) {
     // SET, GET, PING, and unknown command in one recv.
     ProtocolWorkerState state = {};
     protocol_worker_init(&state);
-    Connection *conn = connection_create(10);
-    std::string data =
-        "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n"
-        "*2\r\n$3\r\nGET\r\n$1\r\nk\r\n"
-        "*1\r\n$4\r\nPING\r\n"
-        "*1\r\n$3\r\nFOO\r\n";
-    std::string result = process_recv(conn, reinterpret_cast<const uint8_t *>(data.data()),
+    Connection* conn = connection_create(10);
+    std::string data = "*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n"
+                       "*2\r\n$3\r\nGET\r\n$1\r\nk\r\n"
+                       "*1\r\n$4\r\nPING\r\n"
+                       "*1\r\n$3\r\nFOO\r\n";
+    std::string result = process_recv(conn, reinterpret_cast<const uint8_t*>(data.data()),
                                       static_cast<uint32_t>(data.size()), &state);
     EXPECT_EQ(result, "+OK\r\n$1\r\nv\r\n+PONG\r\n-ERR unknown command\r\n");
     connection_destroy(conn);
@@ -625,7 +658,7 @@ TEST(DSTIntegration, SignalInterruption) {
     WorkerConfig config = {};
     config.cpu_id = 0;
     config.ops = sim_io_ops();
-    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
     config.running = &running;
     config.skip_setup = true;
     config.listen_fd = 0;
@@ -670,7 +703,10 @@ TEST(DSTIntegration, ErrorCompletionClosesConnection) {
     SimIoBackend result = run_worker_sim(events);
     bool was_closed = false;
     for (int fd : result.closed_fds) {
-        if (fd == 10) { was_closed = true; break; }
+        if (fd == 10) {
+            was_closed = true;
+            break;
+        }
     }
     EXPECT_TRUE(was_closed);
 }
@@ -714,7 +750,7 @@ TEST(DSTIntegration, SendFailClosesConnection) {
     WorkerConfig config = {};
     config.cpu_id = 0;
     config.ops = sim_io_ops();
-    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
     config.running = &running;
     config.skip_setup = true;
     config.listen_fd = 0;
@@ -723,7 +759,10 @@ TEST(DSTIntegration, SendFailClosesConnection) {
 
     bool was_closed = false;
     for (int fd : sim.closed_fds) {
-        if (fd == 10) { was_closed = true; break; }
+        if (fd == 10) {
+            was_closed = true;
+            break;
+        }
     }
     EXPECT_TRUE(was_closed);
 }
@@ -744,7 +783,7 @@ TEST(DSTIntegration, PendingCloseRetrySucceeds) {
     WorkerConfig config = {};
     config.cpu_id = 0;
     config.ops = sim_io_ops();
-    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
     config.running = &running;
     config.skip_setup = true;
     config.listen_fd = 0;
@@ -754,7 +793,10 @@ TEST(DSTIntegration, PendingCloseRetrySucceeds) {
     // Close should eventually succeed on retry.
     bool was_closed = false;
     for (int fd : sim.closed_fds) {
-        if (fd == 10) { was_closed = true; break; }
+        if (fd == 10) {
+            was_closed = true;
+            break;
+        }
     }
     EXPECT_TRUE(was_closed);
     // Should have been attempted at least twice.
@@ -769,8 +811,7 @@ TEST(DSTIntegration, CloseRetryQueueOverflowStillClosesHighFd) {
     static constexpr int kConnCount = 300; // exceeds worker's pending-close queue
     for (int fd = 0; fd < kConnCount; fd++) {
         sim.pending.push_back(sim_accept(fd));
-        sim.pending.push_back(sim_recv(&sim_setup, fd, bad.data(),
-                                       static_cast<uint32_t>(bad.size())));
+        sim.pending.push_back(sim_recv(&sim_setup, fd, bad.data(), static_cast<uint32_t>(bad.size())));
     }
     sim.submit_close_fail_count = kConnCount; // first close wave fails with ENOSPC
     sim.submit_close_fail_errno = -ENOSPC;
@@ -781,7 +822,7 @@ TEST(DSTIntegration, CloseRetryQueueOverflowStillClosesHighFd) {
     WorkerConfig config = {};
     config.cpu_id = 0;
     config.ops = sim_io_ops();
-    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
     config.running = &running;
     config.skip_setup = true;
     config.listen_fd = 0;
@@ -823,7 +864,10 @@ TEST(DSTIntegration, RecvAfterMultishotTermination) {
     // recv should have been rearmed for fd 10.
     bool rearmed = false;
     for (int fd : result.recv_armed) {
-        if (fd == 10) { rearmed = true; break; }
+        if (fd == 10) {
+            rearmed = true;
+            break;
+        }
     }
     EXPECT_TRUE(rearmed);
 }
@@ -869,7 +913,7 @@ TEST(DSTIntegration, SendResultZeroClosesConnection) {
     WorkerConfig config = {};
     config.cpu_id = 0;
     config.ops = sim_io_ops();
-    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
     config.running = &running;
     config.skip_setup = true;
     config.listen_fd = 0;
@@ -878,7 +922,10 @@ TEST(DSTIntegration, SendResultZeroClosesConnection) {
 
     bool was_closed = false;
     for (int fd : sim.closed_fds) {
-        if (fd == 10) { was_closed = true; break; }
+        if (fd == 10) {
+            was_closed = true;
+            break;
+        }
     }
     EXPECT_TRUE(was_closed);
 }
@@ -899,7 +946,7 @@ TEST(DSTIntegration, SendResultNegativeClosesConnection) {
     WorkerConfig config = {};
     config.cpu_id = 0;
     config.ops = sim_io_ops();
-    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
     config.running = &running;
     config.skip_setup = true;
     config.listen_fd = 0;
@@ -908,7 +955,10 @@ TEST(DSTIntegration, SendResultNegativeClosesConnection) {
 
     bool was_closed = false;
     for (int fd : sim.closed_fds) {
-        if (fd == 10) { was_closed = true; break; }
+        if (fd == 10) {
+            was_closed = true;
+            break;
+        }
     }
     EXPECT_TRUE(was_closed);
 }
@@ -929,7 +979,7 @@ TEST(DSTIntegration, SendResultOverrunClosesConnection) {
     WorkerConfig config = {};
     config.cpu_id = 0;
     config.ops = sim_io_ops();
-    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
     config.running = &running;
     config.skip_setup = true;
     config.listen_fd = 0;
@@ -938,7 +988,10 @@ TEST(DSTIntegration, SendResultOverrunClosesConnection) {
 
     bool was_closed = false;
     for (int fd : sim.closed_fds) {
-        if (fd == 10) { was_closed = true; break; }
+        if (fd == 10) {
+            was_closed = true;
+            break;
+        }
     }
     EXPECT_TRUE(was_closed);
 }
@@ -947,7 +1000,8 @@ TEST(DSTIntegration, MultipleChunkedSends) {
     // Large response split across 3 partial sends.
     SimIoBackend sim_setup;
     std::string pings;
-    for (int i = 0; i < 5; i++) pings += "*1\r\n$4\r\nPING\r\n";
+    for (int i = 0; i < 5; i++)
+        pings += "*1\r\n$4\r\nPING\r\n";
     // 5 x "+PONG\r\n" = 35 bytes total response
 
     SimIoBackend sim;
@@ -962,7 +1016,7 @@ TEST(DSTIntegration, MultipleChunkedSends) {
     WorkerConfig config = {};
     config.cpu_id = 0;
     config.ops = sim_io_ops();
-    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
     config.running = &running;
     config.skip_setup = true;
     config.listen_fd = 0;
@@ -970,7 +1024,8 @@ TEST(DSTIntegration, MultipleChunkedSends) {
     worker_run(&config);
 
     std::string expected;
-    for (int i = 0; i < 5; i++) expected += "+PONG\r\n";
+    for (int i = 0; i < 5; i++)
+        expected += "+PONG\r\n";
     EXPECT_EQ(sim.sent_data[10], expected);
     EXPECT_EQ(sim.send_call_count, 3);
 }
@@ -1007,7 +1062,7 @@ TEST(DSTIntegration, CloseRetryOnlyOnENOSPC) {
     WorkerConfig config = {};
     config.cpu_id = 0;
     config.ops = sim_io_ops();
-    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
     config.running = &running;
     config.skip_setup = true;
     config.listen_fd = 0;
@@ -1033,7 +1088,8 @@ TEST(DSTIntegration, TxHighWatermarkClosesConnection) {
     // Each GET response is ~"$4000\r\n" + 4000 bytes + "\r\n" ≈ 4010 bytes.
     // Need ~262 GETs to exceed 1 MiB.
     std::string gets;
-    for (int i = 0; i < 300; i++) gets += get_cmd;
+    for (int i = 0; i < 300; i++)
+        gets += get_cmd;
 
     SimIoBackend sim;
     sim.pending.push_back(sim_accept(10));
@@ -1048,7 +1104,7 @@ TEST(DSTIntegration, TxHighWatermarkClosesConnection) {
     WorkerConfig config = {};
     config.cpu_id = 0;
     config.ops = sim_io_ops();
-    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
     config.running = &running;
     config.skip_setup = true;
     config.listen_fd = 0;
@@ -1058,7 +1114,10 @@ TEST(DSTIntegration, TxHighWatermarkClosesConnection) {
     // Connection should have been closed due to backpressure.
     bool was_closed = false;
     for (int fd : sim.closed_fds) {
-        if (fd == 10) { was_closed = true; break; }
+        if (fd == 10) {
+            was_closed = true;
+            break;
+        }
     }
     EXPECT_TRUE(was_closed);
 }
@@ -1072,16 +1131,17 @@ TEST(DSTIntegration, ReassemblyAtStructureBoundaries) {
     // bulk data, etc.
     size_t splits[] = {1, 2, 3, 4, 8, 10, 14, 18, 22, 26, 30};
     for (size_t split : splits) {
-        if (split >= full.size()) continue;
+        if (split >= full.size())
+            continue;
 
         std::vector<IoCompletion> events;
         events.push_back(sim_accept(10));
         events.push_back(sim_recv(&sim_setup, 10, full.data(), static_cast<uint32_t>(split)));
-        events.push_back(sim_recv(&sim_setup, 10, full.data() + split, static_cast<uint32_t>(full.size() - split)));
+        events.push_back(
+            sim_recv(&sim_setup, 10, full.data() + split, static_cast<uint32_t>(full.size() - split)));
 
         SimIoBackend result = run_worker_sim(events);
-        EXPECT_EQ(result.sent_data[10], "+OK\r\n")
-            << "Failed at split point " << split;
+        EXPECT_EQ(result.sent_data[10], "+OK\r\n") << "Failed at split point " << split;
     }
 }
 
@@ -1089,26 +1149,27 @@ TEST(DST, BinaryKeyValueViaDST) {
     // SET/GET with keys/values containing \0, \r, \n.
     ProtocolWorkerState state = {};
     protocol_worker_init(&state);
-    Connection *conn = connection_create(10);
+    Connection* conn = connection_create(10);
 
     // Key: "k\0y" (3 bytes), Value: "v\r\n" (3 bytes)
     uint8_t key[] = {'k', 0x00, 'y'};
     uint8_t val[] = {'v', '\r', '\n'};
 
     std::string set_data = "*3\r\n$3\r\nSET\r\n$3\r\n";
-    set_data.append(reinterpret_cast<char *>(key), 3);
+    set_data.append(reinterpret_cast<char*>(key), 3);
     set_data += "\r\n$3\r\n";
-    set_data.append(reinterpret_cast<char *>(val), 3);
+    set_data.append(reinterpret_cast<char*>(val), 3);
     set_data += "\r\n";
 
-    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(set_data.data()),
-                           static_cast<uint32_t>(set_data.size()), &state), "+OK\r\n");
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t*>(set_data.data()),
+                           static_cast<uint32_t>(set_data.size()), &state),
+              "+OK\r\n");
 
     std::string get_data = "*2\r\n$3\r\nGET\r\n$3\r\n";
-    get_data.append(reinterpret_cast<char *>(key), 3);
+    get_data.append(reinterpret_cast<char*>(key), 3);
     get_data += "\r\n";
 
-    std::string resp = process_recv(conn, reinterpret_cast<const uint8_t *>(get_data.data()),
+    std::string resp = process_recv(conn, reinterpret_cast<const uint8_t*>(get_data.data()),
                                     static_cast<uint32_t>(get_data.size()), &state);
     // Expected: "$3\r\nv\r\n\r\n" — bulk string with the binary value.
     EXPECT_EQ(resp.size(), 9u); // "$3\r\n" (4) + "v\r\n" (3) + "\r\n" (2)
@@ -1124,14 +1185,15 @@ TEST(DST, EmptyKeyAndEmptyValue) {
     // SET/GET with zero-length key and value.
     ProtocolWorkerState state = {};
     protocol_worker_init(&state);
-    Connection *conn = connection_create(10);
+    Connection* conn = connection_create(10);
 
     std::string set_data = "*3\r\n$3\r\nSET\r\n$0\r\n\r\n$0\r\n\r\n";
-    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t *>(set_data.data()),
-                           static_cast<uint32_t>(set_data.size()), &state), "+OK\r\n");
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t*>(set_data.data()),
+                           static_cast<uint32_t>(set_data.size()), &state),
+              "+OK\r\n");
 
     std::string get_data = "*2\r\n$3\r\nGET\r\n$0\r\n\r\n";
-    std::string resp = process_recv(conn, reinterpret_cast<const uint8_t *>(get_data.data()),
+    std::string resp = process_recv(conn, reinterpret_cast<const uint8_t*>(get_data.data()),
                                     static_cast<uint32_t>(get_data.size()), &state);
     EXPECT_EQ(resp, "$0\r\n\r\n");
 
@@ -1142,7 +1204,8 @@ TEST(DSTIntegration, MultiPartPartialSend) {
     // Multiple PINGs with response split across 5 partial sends.
     SimIoBackend sim_setup;
     std::string pings;
-    for (int i = 0; i < 3; i++) pings += "*1\r\n$4\r\nPING\r\n";
+    for (int i = 0; i < 3; i++)
+        pings += "*1\r\n$4\r\nPING\r\n";
     // 3 x "+PONG\r\n" = 21 bytes total response
 
     SimIoBackend sim;
@@ -1157,7 +1220,7 @@ TEST(DSTIntegration, MultiPartPartialSend) {
     WorkerConfig config = {};
     config.cpu_id = 0;
     config.ops = sim_io_ops();
-    config.backend = reinterpret_cast<IoBackend *>(&sim);
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
     config.running = &running;
     config.skip_setup = true;
     config.listen_fd = 0;
@@ -1165,7 +1228,8 @@ TEST(DSTIntegration, MultiPartPartialSend) {
     worker_run(&config);
 
     std::string expected;
-    for (int i = 0; i < 3; i++) expected += "+PONG\r\n";
+    for (int i = 0; i < 3; i++)
+        expected += "+PONG\r\n";
     EXPECT_EQ(sim.sent_data[10], expected);
     EXPECT_EQ(sim.send_call_count, 5);
 }

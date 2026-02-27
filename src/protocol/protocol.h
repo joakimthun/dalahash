@@ -94,7 +94,7 @@
 struct KvStore;
 
 struct ProtocolInitContext {
-    KvStore *shared_store;
+    KvStore* shared_store;
     uint32_t worker_id;
     uint32_t worker_count;
 };

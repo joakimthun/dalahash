@@ -48,7 +48,7 @@ struct KvSetOptions {
 struct KvValueView {
     // Pointer into internal store memory; caller must treat this as read-only.
     // Lifetime is short-lived and intended for immediate response formatting.
-    const uint8_t *data;
+    const uint8_t* data;
     // Value size in bytes.
     uint32_t len;
 };
@@ -75,14 +75,14 @@ struct KvStoreConfig {
 //   - Returned object supports concurrent get/set from multiple threads.
 //
 // Returns nullptr on allocation/configuration failure.
-KvStore *kv_store_create(const KvStoreConfig *config);
+KvStore* kv_store_create(const KvStoreConfig* config);
 
 // Destroy a store and free all associated memory.
 //
 // Thread-safety:
 //   - Caller must guarantee no concurrent get/set/quiescent/register calls.
 //   - This is a terminal operation for the instance.
-void kv_store_destroy(KvStore *store);
+void kv_store_destroy(KvStore* store);
 
 // Register a worker id for quiescent reclamation participation.
 //
@@ -95,7 +95,7 @@ void kv_store_destroy(KvStore *store);
 //     kv_store_quiescent from that worker.
 //
 // Returns 0 on success, -EINVAL on invalid input/range.
-int kv_store_register_worker(KvStore *store, uint32_t worker_id);
+int kv_store_register_worker(KvStore* store, uint32_t worker_id);
 
 // Publish a worker quiescent point and perform deferred reclamation work.
 //
@@ -105,7 +105,7 @@ int kv_store_register_worker(KvStore *store, uint32_t worker_id);
 //
 // Thread-safety:
 //   - Safe concurrently with get/set/quiescent from other workers.
-void kv_store_quiescent(KvStore *store, uint32_t worker_id);
+void kv_store_quiescent(KvStore* store, uint32_t worker_id);
 
 // Lookup a key.
 //
@@ -124,8 +124,8 @@ void kv_store_quiescent(KvStore *store, uint32_t worker_id);
 //
 // Invalid worker_id behavior:
 //   - Out-of-range or unregistered worker ids return MISS.
-KvGetStatus kv_store_get(KvStore *store, uint32_t worker_id, std::string_view key,
-                         uint64_t now_ms, KvValueView *out);
+KvGetStatus kv_store_get(KvStore* store, uint32_t worker_id, std::string_view key, uint64_t now_ms,
+                         KvValueView* out);
 
 // Insert or overwrite a key/value pair.
 //
@@ -143,17 +143,16 @@ KvGetStatus kv_store_get(KvStore *store, uint32_t worker_id, std::string_view ke
 //   - Store attempts to trim via approximate LRU-style eviction when over target.
 //   - OOM means write could not be admitted under current conditions.
 //   - INVALID is returned for out-of-range or unregistered worker ids.
-KvSetStatus kv_store_set(KvStore *store, uint32_t worker_id, std::string_view key,
-                         std::string_view value, uint64_t now_ms,
-                         const KvSetOptions *opts);
+KvSetStatus kv_store_set(KvStore* store, uint32_t worker_id, std::string_view key, std::string_view value,
+                         uint64_t now_ms, const KvSetOptions* opts);
 
 // Return current accounted bytes for active slot-resident nodes.
 //
 // Note: this is payload-node accounting, not full process RSS.
-uint64_t kv_store_live_bytes(const KvStore *store);
+uint64_t kv_store_live_bytes(const KvStore* store);
 
 // Return configured capacity target in bytes.
-uint64_t kv_store_capacity_bytes(const KvStore *store);
+uint64_t kv_store_capacity_bytes(const KvStore* store);
 
 // Helper for current wall-clock time in milliseconds (CLOCK_REALTIME).
 //

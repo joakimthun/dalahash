@@ -14,9 +14,7 @@ struct ParseIntResult {
     int value;
 };
 
-static inline bool is_ascii_digit(uint8_t c) {
-    return c >= '0' && c <= '9';
-}
+static inline bool is_ascii_digit(uint8_t c) { return c >= '0' && c <= '9'; }
 
 // Reads a non-negative decimal integer starting at buf[*pos], then advances
 // *pos past the mandatory \r\n terminator.
@@ -28,7 +26,7 @@ static inline bool is_ascii_digit(uint8_t c) {
 // Request parsing rejects negative bulk lengths, so this only accepts digits.
 // Returns ParseIntStatus::OK with parsed value on success, INCOMPLETE if the
 // full line has not arrived, or ERROR on malformed input.
-static ParseIntResult parse_int(const uint8_t *buf, uint32_t len, uint32_t *pos) {
+static ParseIntResult parse_int(const uint8_t* buf, uint32_t len, uint32_t* pos) {
     ASSERT(buf != nullptr || len == 0, "parse_int null buffer with non-zero length");
     ASSERT(pos != nullptr, "parse_int requires position pointer");
     ASSERT(*pos <= len, "parse_int position out of bounds");
@@ -37,8 +35,10 @@ static ParseIntResult parse_int(const uint8_t *buf, uint32_t len, uint32_t *pos)
     bool has_digits = false;
     while (p < len) {
         const uint8_t c = buf[p];
-        if (c == '\r') break;
-        if (!is_ascii_digit(c)) return {ParseIntStatus::ERROR, 0};
+        if (c == '\r')
+            break;
+        if (!is_ascii_digit(c))
+            return {ParseIntStatus::ERROR, 0};
         const int digit = static_cast<int>(c - '0');
         // Overflow check: n * 10 + digit > INT_MAX
         if (n > INT_MAX / 10 || (n == INT_MAX / 10 && digit > 7))
@@ -48,14 +48,18 @@ static ParseIntResult parse_int(const uint8_t *buf, uint32_t len, uint32_t *pos)
         p++;
     }
 
-    if (p >= len) return {ParseIntStatus::INCOMPLETE, 0};
+    if (p >= len)
+        return {ParseIntStatus::INCOMPLETE, 0};
 
     // Need at least \r and \n still in the buffer.
-    if (p + 1 >= len) return {ParseIntStatus::INCOMPLETE, 0};
+    if (p + 1 >= len)
+        return {ParseIntStatus::INCOMPLETE, 0};
 
     // No digits between prefix and \r is malformed (e.g. "*\r\n").
-    if (!has_digits) return {ParseIntStatus::ERROR, 0};
-    if (buf[p + 1] != '\n') return {ParseIntStatus::ERROR, 0};
+    if (!has_digits)
+        return {ParseIntStatus::ERROR, 0};
+    if (buf[p + 1] != '\n')
+        return {ParseIntStatus::ERROR, 0};
 
     *pos = p + 2; // skip \r\n
     return {ParseIntStatus::OK, n};
@@ -72,21 +76,26 @@ static ParseIntResult parse_int(const uint8_t *buf, uint32_t len, uint32_t *pos)
 //
 // All cmd->args[i].data pointers point directly into data[] — no copying.
 // On success, *consumed covers the entire command including all \r\n pairs.
-RespParseResult resp_parse(const uint8_t *data, uint32_t len,
-                           RespCommand *cmd, uint32_t *consumed) {
+RespParseResult resp_parse(const uint8_t* data, uint32_t len, RespCommand* cmd, uint32_t* consumed) {
     ASSERT(cmd != nullptr, "resp_parse requires cmd output");
     ASSERT(consumed != nullptr, "resp_parse requires consumed output");
     ASSERT(data != nullptr || len == 0, "resp_parse null data with non-zero length");
-    if (!cmd || !consumed) return RespParseResult::ERROR;
-    if (!data && len > 0) return RespParseResult::ERROR;
+    if (!cmd || !consumed)
+        return RespParseResult::ERROR;
+    if (!data && len > 0)
+        return RespParseResult::ERROR;
 
     uint32_t pos = 0;
 
     // Empty buffer — wait for data.
-    if (pos >= len) { *consumed = 0; return RespParseResult::INCOMPLETE; }
+    if (pos >= len) {
+        *consumed = 0;
+        return RespParseResult::INCOMPLETE;
+    }
 
     // RESP requests must start with '*' (array). Inline commands not supported.
-    if (data[pos] != '*') return RespParseResult::ERROR;
+    if (data[pos] != '*')
+        return RespParseResult::ERROR;
     pos++;
 
     // Array element count.
@@ -95,17 +104,24 @@ RespParseResult resp_parse(const uint8_t *data, uint32_t len,
         *consumed = 0;
         return RespParseResult::INCOMPLETE;
     }
-    if (argc_parse.status == ParseIntStatus::ERROR) return RespParseResult::ERROR;
+    if (argc_parse.status == ParseIntStatus::ERROR)
+        return RespParseResult::ERROR;
     int argc = argc_parse.value;
-    if (argc < 0) return RespParseResult::ERROR;
-    if (argc < 1 || argc > RESP_MAX_ARGS) return RespParseResult::ERROR;
+    if (argc < 0)
+        return RespParseResult::ERROR;
+    if (argc < 1 || argc > RESP_MAX_ARGS)
+        return RespParseResult::ERROR;
     cmd->argc = argc;
 
     for (int i = 0; i < argc; i++) {
-        if (pos >= len) { *consumed = 0; return RespParseResult::INCOMPLETE; }
+        if (pos >= len) {
+            *consumed = 0;
+            return RespParseResult::INCOMPLETE;
+        }
 
         // Each element must be a bulk string ('$').
-        if (data[pos] != '$') return RespParseResult::ERROR;
+        if (data[pos] != '$')
+            return RespParseResult::ERROR;
         pos++;
 
         // Bulk string byte length (may be -1 for null, but not in requests).
@@ -114,9 +130,11 @@ RespParseResult resp_parse(const uint8_t *data, uint32_t len,
             *consumed = 0;
             return RespParseResult::INCOMPLETE;
         }
-        if (slen_parse.status == ParseIntStatus::ERROR) return RespParseResult::ERROR;
+        if (slen_parse.status == ParseIntStatus::ERROR)
+            return RespParseResult::ERROR;
         int slen = slen_parse.value;
-        if (slen < 0) return RespParseResult::ERROR;
+        if (slen < 0)
+            return RespParseResult::ERROR;
 
         // Check that the full payload + trailing \r\n is present.
         uint32_t slen_u32 = static_cast<uint32_t>(slen);
@@ -140,14 +158,14 @@ RespParseResult resp_parse(const uint8_t *data, uint32_t len,
 }
 
 // Emit "+OK\r\n" — RESP simple string, used as the SET reply.
-uint32_t resp_write_ok(uint8_t *out) {
+uint32_t resp_write_ok(uint8_t* out) {
     ASSERT(out != nullptr, "resp_write_ok requires output buffer");
     std::memcpy(out, "+OK\r\n", 5);
     return 5;
 }
 
 // Emit "$-1\r\n" — RESP null bulk string, used when a key is not found.
-uint32_t resp_write_null(uint8_t *out) {
+uint32_t resp_write_null(uint8_t* out) {
     ASSERT(out != nullptr, "resp_write_null requires output buffer");
     std::memcpy(out, "$-1\r\n", 5);
     return 5;
@@ -155,31 +173,36 @@ uint32_t resp_write_null(uint8_t *out) {
 
 //  Emit a RESP bulk string: "$<len>\r\n<data>\r\n".
 // Used for GET responses. data[] is copied into out[]; no pointer aliasing.
-uint32_t resp_write_bulk(uint8_t *out, const uint8_t *data, uint32_t len) {
+uint32_t resp_write_bulk(uint8_t* out, const uint8_t* data, uint32_t len) {
     ASSERT(out != nullptr, "resp_write_bulk requires output buffer");
     ASSERT(data != nullptr || len == 0, "resp_write_bulk null data with non-zero length");
     uint32_t n = 0;
     out[n++] = '$';
-    n += static_cast<uint32_t>(std::snprintf(reinterpret_cast<char *>(out) + n, 20, "%u", len));
-    out[n++] = '\r'; out[n++] = '\n';
-    if (len > 0) std::memcpy(out + n, data, len);
+    n += static_cast<uint32_t>(std::snprintf(reinterpret_cast<char*>(out) + n, 20, "%u", len));
+    out[n++] = '\r';
+    out[n++] = '\n';
+    if (len > 0)
+        std::memcpy(out + n, data, len);
     n += len;
-    out[n++] = '\r'; out[n++] = '\n';
+    out[n++] = '\r';
+    out[n++] = '\n';
     return n;
 }
 
 // Emit "-ERR <msg>\r\n" — RESP error, truncated to 512 bytes total.
-uint32_t resp_write_error(uint8_t *out, const char *msg) {
+uint32_t resp_write_error(uint8_t* out, const char* msg) {
     ASSERT(out != nullptr, "resp_write_error requires output buffer");
     ASSERT(msg != nullptr, "resp_write_error requires message");
-    if (!out || !msg) return 0;
-    int n = std::snprintf(reinterpret_cast<char *>(out), 512, "-ERR %s\r\n", msg);
-    if (n <= 0) return 0;
+    if (!out || !msg)
+        return 0;
+    int n = std::snprintf(reinterpret_cast<char*>(out), 512, "-ERR %s\r\n", msg);
+    if (n <= 0)
+        return 0;
     return static_cast<uint32_t>(n >= 512 ? 511 : n);
 }
 
 // Emit "+PONG\r\n" — RESP simple string reply to PING.
-uint32_t resp_write_pong(uint8_t *out) {
+uint32_t resp_write_pong(uint8_t* out) {
     ASSERT(out != nullptr, "resp_write_pong requires output buffer");
     std::memcpy(out, "+PONG\r\n", 7);
     return 7;

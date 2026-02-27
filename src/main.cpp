@@ -1,20 +1,20 @@
 // main.cpp — Entry point.
 
-#include "net/server.h"
 #include "base/assert.h"
+#include "net/server.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
     ASSERT(argc >= 0, "argc must be non-negative");
     ASSERT(argv != nullptr || argc == 0, "argv is null with non-zero argc");
     ServerConfig config = {.port = 6379, .num_workers = 0, .store_bytes = 256ull << 20};
 
     for (int i = 1; i < argc; i++) {
         if (std::strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
-            char *end = nullptr;
+            char* end = nullptr;
             unsigned long parsed = std::strtoul(argv[++i], &end, 10);
             if (!end || *end != '\0' || parsed == 0 || parsed > 65535ul) {
                 std::fprintf(stderr, "Invalid --port value\n");
@@ -24,7 +24,7 @@ int main(int argc, char **argv) {
         } else if (std::strcmp(argv[i], "--workers") == 0 && i + 1 < argc) {
             config.num_workers = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--store-bytes") == 0 && i + 1 < argc) {
-            char *end = nullptr;
+            char* end = nullptr;
             unsigned long long parsed = std::strtoull(argv[++i], &end, 10);
             if (!end || *end != '\0' || parsed == 0) {
                 std::fprintf(stderr, "Invalid --store-bytes value\n");

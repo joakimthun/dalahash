@@ -76,12 +76,11 @@ inline uint64_t mix_seed(uint64_t seed, uint64_t value) {
 // - Easier debugging when dumping keys/values.
 // - Avoids control-byte surprises in tooling and logs.
 // - Still gives sufficient entropy for benchmark corpus generation.
-inline char random_ascii(XorShift64 *rng) {
-    static constexpr char kAlphabet[] =
-        "abcdefghijklmnopqrstuvwxyz"
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        "0123456789"
-        "-_";
+inline char random_ascii(XorShift64* rng) {
+    static constexpr char kAlphabet[] = "abcdefghijklmnopqrstuvwxyz"
+                                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                                        "0123456789"
+                                        "-_";
     return kAlphabet[rng->next() % (sizeof(kAlphabet) - 1u)];
 }
 
@@ -104,8 +103,8 @@ inline char random_ascii(XorShift64 *rng) {
 // Determinism contract:
 // - Identical parameters always produce byte-identical corpus content.
 // - That makes benchmark comparisons repeatable across machines/runs.
-inline std::vector<std::string> make_corpus(uint32_t count, uint32_t item_size,
-                                            uint64_t seed, bool inject_index_prefix) {
+inline std::vector<std::string> make_corpus(uint32_t count, uint32_t item_size, uint64_t seed,
+                                            bool inject_index_prefix) {
     std::vector<std::string> out;
     // Reserve once so generation cost is not polluted by repeated vector growth.
     out.reserve(count);
@@ -156,20 +155,17 @@ inline std::vector<std::string> make_corpus(uint32_t count, uint32_t item_size,
 // Why benchmark-local sizing (instead of hardcoded constant):
 // - Argument matrices vary from tiny to multi-million entries.
 // - Dynamic sizing keeps each case comparable while avoiding universal over-allocation.
-inline uint64_t derive_capacity_bytes(uint32_t dataset_size, uint32_t key_size,
-                                      uint32_t value_size) {
+inline uint64_t derive_capacity_bytes(uint32_t dataset_size, uint32_t key_size, uint32_t value_size) {
     static constexpr uint64_t kMinCapacity = 64ull << 20; // 64 MiB
     // Approximate fixed node overhead used by shared_kv_store node layout.
     static constexpr uint32_t kNodeHeaderEstimate = 64u;
     // Mirrors allocator class geometry used by the store implementation.
     // Capacity must account for class rounding to avoid underestimation.
-    static constexpr uint32_t kClassSizes[] = {
-        64u, 128u, 256u, 512u, 1024u, 2048u, 4096u, 8192u, 16384u, 32768u
-    };
+    static constexpr uint32_t kClassSizes[] = {64u,   128u,  256u,  512u,   1024u,
+                                               2048u, 4096u, 8192u, 16384u, 32768u};
 
     // Baseline per-item footprint before class rounding.
-    const uint64_t raw_item_size = static_cast<uint64_t>(key_size) +
-                                   static_cast<uint64_t>(value_size) +
+    const uint64_t raw_item_size = static_cast<uint64_t>(key_size) + static_cast<uint64_t>(value_size) +
                                    static_cast<uint64_t>(kNodeHeaderEstimate);
 
     // Round up to nearest supported class size.

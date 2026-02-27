@@ -9,11 +9,11 @@
 #include <string>
 #include <vector>
 
-static RespCommand make_cmd(std::initializer_list<const char *> args) {
+static RespCommand make_cmd(std::initializer_list<const char*> args) {
     RespCommand cmd = {};
     int i = 0;
-    for (const char *arg : args) {
-        cmd.args[i].data = reinterpret_cast<const uint8_t *>(arg);
+    for (const char* arg : args) {
+        cmd.args[i].data = reinterpret_cast<const uint8_t*>(arg);
         cmd.args[i].len = static_cast<uint32_t>(std::strlen(arg));
         i++;
     }
@@ -21,10 +21,10 @@ static RespCommand make_cmd(std::initializer_list<const char *> args) {
     return cmd;
 }
 
-static std::string exec(const RespCommand &cmd, Store *store) {
+static std::string exec(const RespCommand& cmd, Store* store) {
     uint8_t buf[4096];
     uint32_t n = command_execute(&cmd, store, 12345, buf, sizeof(buf));
-    return std::string(reinterpret_cast<char *>(buf), n);
+    return std::string(reinterpret_cast<char*>(buf), n);
 }
 
 TEST(Command, GetMiss) {
@@ -110,13 +110,13 @@ TEST(Command, LargeValue) {
     Store store;
     std::string big(4000, 'Z');
     RespCommand cmd = {};
-    const char *set_str = "SET";
-    const char *key_str = "bigkey";
-    cmd.args[0].data = reinterpret_cast<const uint8_t *>(set_str);
+    const char* set_str = "SET";
+    const char* key_str = "bigkey";
+    cmd.args[0].data = reinterpret_cast<const uint8_t*>(set_str);
     cmd.args[0].len = 3;
-    cmd.args[1].data = reinterpret_cast<const uint8_t *>(key_str);
+    cmd.args[1].data = reinterpret_cast<const uint8_t*>(key_str);
     cmd.args[1].len = 6;
-    cmd.args[2].data = reinterpret_cast<const uint8_t *>(big.data());
+    cmd.args[2].data = reinterpret_cast<const uint8_t*>(big.data());
     cmd.args[2].len = static_cast<uint32_t>(big.size());
     cmd.argc = 3;
     EXPECT_EQ(exec(cmd, &store), "+OK\r\n");
@@ -135,8 +135,8 @@ TEST(Command, BinaryKeyValue) {
     uint8_t val_data[] = {'v', 0x00, '\n', 'l'};
 
     RespCommand set_cmd = {};
-    const char *set_str = "SET";
-    set_cmd.args[0].data = reinterpret_cast<const uint8_t *>(set_str);
+    const char* set_str = "SET";
+    set_cmd.args[0].data = reinterpret_cast<const uint8_t*>(set_str);
     set_cmd.args[0].len = 3;
     set_cmd.args[1].data = key_data;
     set_cmd.args[1].len = 3;
@@ -146,19 +146,19 @@ TEST(Command, BinaryKeyValue) {
 
     uint8_t buf[4096];
     uint32_t n = command_execute(&set_cmd, &store, 12345, buf, sizeof(buf));
-    EXPECT_EQ(std::string(reinterpret_cast<char *>(buf), n), "+OK\r\n");
+    EXPECT_EQ(std::string(reinterpret_cast<char*>(buf), n), "+OK\r\n");
 
     // GET with same binary key.
     RespCommand get_cmd = {};
-    const char *get_str = "GET";
-    get_cmd.args[0].data = reinterpret_cast<const uint8_t *>(get_str);
+    const char* get_str = "GET";
+    get_cmd.args[0].data = reinterpret_cast<const uint8_t*>(get_str);
     get_cmd.args[0].len = 3;
     get_cmd.args[1].data = key_data;
     get_cmd.args[1].len = 3;
     get_cmd.argc = 2;
 
     n = command_execute(&get_cmd, &store, 12345, buf, sizeof(buf));
-    std::string result(reinterpret_cast<char *>(buf), n);
+    std::string result(reinterpret_cast<char*>(buf), n);
     EXPECT_TRUE(result.starts_with("$4\r\n"));
 }
 
@@ -200,10 +200,10 @@ TEST(Command, CommandWithArgs) {
     EXPECT_EQ(exec(make_cmd({"COMMAND", "DOCS", "GET"}), &store), "*0\r\n");
 }
 
-static std::string exec_sized(const RespCommand &cmd, Store *store, uint32_t buf_size) {
+static std::string exec_sized(const RespCommand& cmd, Store* store, uint32_t buf_size) {
     std::vector<uint8_t> buf(buf_size);
     uint32_t n = command_execute(&cmd, store, 12345, buf.data(), buf_size);
-    return std::string(reinterpret_cast<char *>(buf.data()), n);
+    return std::string(reinterpret_cast<char*>(buf.data()), n);
 }
 
 TEST(Command, OutputBufferTooSmall) {
@@ -228,7 +228,7 @@ TEST(Command, SetOOMReturnsErr) {
         .buckets_per_shard = 16,
         .worker_count = 1,
     };
-    KvStore *shared = kv_store_create(&cfg);
+    KvStore* shared = kv_store_create(&cfg);
     ASSERT_NE(shared, nullptr);
     ASSERT_EQ(kv_store_register_worker(shared, 0), 0);
 
@@ -237,13 +237,13 @@ TEST(Command, SetOOMReturnsErr) {
 
     std::string big(256, 'x');
     RespCommand cmd = {};
-    const char *set_str = "SET";
-    const char *key = "k";
-    cmd.args[0].data = reinterpret_cast<const uint8_t *>(set_str);
+    const char* set_str = "SET";
+    const char* key = "k";
+    cmd.args[0].data = reinterpret_cast<const uint8_t*>(set_str);
     cmd.args[0].len = 3;
-    cmd.args[1].data = reinterpret_cast<const uint8_t *>(key);
+    cmd.args[1].data = reinterpret_cast<const uint8_t*>(key);
     cmd.args[1].len = 1;
-    cmd.args[2].data = reinterpret_cast<const uint8_t *>(big.data());
+    cmd.args[2].data = reinterpret_cast<const uint8_t*>(big.data());
     cmd.args[2].len = static_cast<uint32_t>(big.size());
     cmd.argc = 3;
 

@@ -2,8 +2,8 @@
 
 #include "server.h"
 #include "base/assert.h"
-#include "kv/shared_kv_store.h"
 #include "io_uring_backend.h"
+#include "kv/shared_kv_store.h"
 #include "worker.h"
 
 #include <atomic>
@@ -27,32 +27,33 @@ static void signal_handler(int sig) {
     (void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
 }
 
-static void *worker_thread_fn(void *arg) {
-    worker_run(static_cast<WorkerConfig *>(arg));
+static void* worker_thread_fn(void* arg) {
+    worker_run(static_cast<WorkerConfig*>(arg));
     return nullptr;
 }
 
 static constexpr uint32_t RING_SIZE = 4096;
-static constexpr uint32_t BUF_COUNT = 1024;  // provided buffers per worker
-static constexpr uint32_t BUF_SIZE  = 4096;
+static constexpr uint32_t BUF_COUNT = 1024; // provided buffers per worker
+static constexpr uint32_t BUF_SIZE = 4096;
 
-int server_start(const ServerConfig *config) {
+int server_start(const ServerConfig* config) {
     ASSERT(config != nullptr, "server_start requires config");
-    if (!config) return 1;
+    if (!config)
+        return 1;
 
     int num_workers = config->num_workers;
     if (num_workers <= 0) {
-                //  sysconf(3) _SC_NPROCESSORS_ONLN — number of CPUs currently online.
+        //  sysconf(3) _SC_NPROCESSORS_ONLN — number of CPUs currently online.
         // We default to one worker per core for the thread-per-core model.
         num_workers = static_cast<int>(sysconf(_SC_NPROCESSORS_ONLN));
-        if (num_workers <= 0) num_workers = 1;
+        if (num_workers <= 0)
+            num_workers = 1;
     }
     ASSERT(num_workers > 0, "num_workers must be positive");
 
-    std::fprintf(stderr, "dalahash: starting %d workers on port %d\n",
-                 num_workers, config->port);
+    std::fprintf(stderr, "dalahash: starting %d workers on port %d\n", num_workers, config->port);
 
-        //  sigaction(2) — install signal handlers for clean shutdown.
+    //  sigaction(2) — install signal handlers for clean shutdown.
     // sa_flags = 0: deliberately no SA_RESTART. Without SA_RESTART, blocked
     // syscalls return -EINTR when a signal arrives. This is critical for
     // io_uring: when io_uring_submit_and_wait_timeout is blocked waiting for
@@ -63,16 +64,18 @@ int server_start(const ServerConfig *config) {
     sa.sa_handler = signal_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = 0;
-    ASSERT(sigaction(SIGINT,  &sa, nullptr) == 0, "sigaction(SIGINT) failed");
+    ASSERT(sigaction(SIGINT, &sa, nullptr) == 0, "sigaction(SIGINT) failed");
     ASSERT(sigaction(SIGTERM, &sa, nullptr) == 0, "sigaction(SIGTERM) failed");
 
     g_running.store(true, std::memory_order_relaxed);
 
-    auto *configs = static_cast<WorkerConfig *>(std::calloc(static_cast<size_t>(num_workers), sizeof(WorkerConfig)));
-    auto *threads = static_cast<pthread_t *>(std::calloc(static_cast<size_t>(num_workers), sizeof(pthread_t)));
+    auto* configs =
+        static_cast<WorkerConfig*>(std::calloc(static_cast<size_t>(num_workers), sizeof(WorkerConfig)));
+    auto* threads = static_cast<pthread_t*>(std::calloc(static_cast<size_t>(num_workers), sizeof(pthread_t)));
     if (!configs || !threads) {
         std::fprintf(stderr, "dalahash: alloc failed\n");
-        std::free(configs); std::free(threads);
+        std::free(configs);
+        std::free(threads);
         return 1;
     }
 
@@ -82,7 +85,7 @@ int server_start(const ServerConfig *config) {
         .buckets_per_shard = 0,
         .worker_count = static_cast<uint32_t>(num_workers),
     };
-    KvStore *shared_store = kv_store_create(&store_cfg);
+    KvStore* shared_store = kv_store_create(&store_cfg);
     if (!shared_store) {
         std::fprintf(stderr, "dalahash: shared store init failed\n");
         std::free(configs);
@@ -91,22 +94,24 @@ int server_start(const ServerConfig *config) {
     }
 
     for (int i = 0; i < num_workers; i++) {
-        IoBackend *backend = io_uring_backend_create(RING_SIZE, BUF_COUNT, BUF_SIZE);
+        IoBackend* backend = io_uring_backend_create(RING_SIZE, BUF_COUNT, BUF_SIZE);
         if (!backend) {
             std::fprintf(stderr, "dalahash: backend create failed for worker %d\n", i);
             g_running.store(false, std::memory_order_relaxed);
             break;
         }
-        configs[i] = {.cpu_id = i, .port = config->port, .ops = io_uring_ops(),
-                      .backend = backend, .running = &g_running,
+        configs[i] = {.cpu_id = i,
+                      .port = config->port,
+                      .ops = io_uring_ops(),
+                      .backend = backend,
+                      .running = &g_running,
                       .shared_store = shared_store,
                       .worker_id = static_cast<uint32_t>(i),
                       .worker_count = static_cast<uint32_t>(num_workers)};
 
         int ret = pthread_create(&threads[i], nullptr, worker_thread_fn, &configs[i]);
         if (ret != 0) {
-            std::fprintf(stderr, "dalahash: thread create failed for worker %d: %s\n",
-                         i, std::strerror(ret));
+            std::fprintf(stderr, "dalahash: thread create failed for worker %d: %s\n", i, std::strerror(ret));
             configs[i].ops.destroy(configs[i].backend);
             configs[i].backend = nullptr;
             g_running.store(false, std::memory_order_relaxed);

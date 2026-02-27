@@ -10,14 +10,14 @@
 
 namespace {
 
-static void add_baseline_args(benchmark::internal::Benchmark *b) {
+static void add_baseline_args(benchmark::internal::Benchmark* b) {
     b->Args({4096, 16, 64});
     b->Args({4096, 16, 256});
     b->Args({16384, 24, 128});
     b->Args({65536, 32, 256});
 }
 
-static void add_large_dataset_args(benchmark::internal::Benchmark *b) {
+static void add_large_dataset_args(benchmark::internal::Benchmark* b) {
     b->Args({2000000, 16, 64});
     b->Args({4000000, 16, 64});
     b->Args({8000000, 16, 64});
@@ -26,22 +26,24 @@ static void add_large_dataset_args(benchmark::internal::Benchmark *b) {
     b->Args({8000000, 24, 128});
 }
 
-static void add_all_args(benchmark::internal::Benchmark *b) {
+static void add_all_args(benchmark::internal::Benchmark* b) {
     add_baseline_args(b);
     add_large_dataset_args(b);
 }
 
-static bool parse_sizes(const benchmark::State &state, uint32_t *dataset_size,
-                        uint32_t *key_size, uint32_t *value_size) {
-    if (!dataset_size || !key_size || !value_size) return false;
-    if (state.range(0) <= 0 || state.range(1) <= 0 || state.range(2) <= 0) return false;
+static bool parse_sizes(const benchmark::State& state, uint32_t* dataset_size, uint32_t* key_size,
+                        uint32_t* value_size) {
+    if (!dataset_size || !key_size || !value_size)
+        return false;
+    if (state.range(0) <= 0 || state.range(1) <= 0 || state.range(2) <= 0)
+        return false;
     *dataset_size = static_cast<uint32_t>(state.range(0));
     *key_size = static_cast<uint32_t>(state.range(1));
     *value_size = static_cast<uint32_t>(state.range(2));
     return true;
 }
 
-static void BM_SharedKvSingleSet(benchmark::State &state) {
+static void BM_SharedKvSingleSet(benchmark::State& state) {
     uint32_t dataset_size = 0;
     uint32_t key_size = 0;
     uint32_t value_size = 0;
@@ -56,7 +58,7 @@ static void BM_SharedKvSingleSet(benchmark::State &state) {
         .buckets_per_shard = 0,
         .worker_count = 1,
     };
-    KvStore *store = kv_store_create(&cfg);
+    KvStore* store = kv_store_create(&cfg);
     if (!store) {
         state.SkipWithError("kv_store_create failed");
         return;
@@ -77,8 +79,8 @@ static void BM_SharedKvSingleSet(benchmark::State &state) {
     uint64_t bytes = 0;
     for (auto _ : state) {
         (void)_;
-        const std::string &k = keys[idx];
-        const std::string &v = values[idx];
+        const std::string& k = keys[idx];
+        const std::string& v = values[idx];
         KvSetStatus st = kv_store_set(store, 0, k, v, now_ms, nullptr);
         if (st != KvSetStatus::OK) {
             state.SkipWithError("kv_store_set failed");
@@ -89,7 +91,8 @@ static void BM_SharedKvSingleSet(benchmark::State &state) {
         bytes += static_cast<uint64_t>(k.size() + v.size());
         now_ms++;
         idx++;
-        if (idx == dataset_size) idx = 0;
+        if (idx == dataset_size)
+            idx = 0;
     }
 
     kv_store_quiescent(store, 0);
@@ -99,7 +102,7 @@ static void BM_SharedKvSingleSet(benchmark::State &state) {
     state.SetBytesProcessed(static_cast<int64_t>(bytes));
 }
 
-static void BM_SharedKvSingleGetHit(benchmark::State &state) {
+static void BM_SharedKvSingleGetHit(benchmark::State& state) {
     uint32_t dataset_size = 0;
     uint32_t key_size = 0;
     uint32_t value_size = 0;
@@ -114,7 +117,7 @@ static void BM_SharedKvSingleGetHit(benchmark::State &state) {
         .buckets_per_shard = 0,
         .worker_count = 1,
     };
-    KvStore *store = kv_store_create(&cfg);
+    KvStore* store = kv_store_create(&cfg);
     if (!store) {
         state.SkipWithError("kv_store_create failed");
         return;
@@ -147,7 +150,7 @@ static void BM_SharedKvSingleGetHit(benchmark::State &state) {
     for (auto _ : state) {
         (void)_;
         KvValueView out = {};
-        const std::string &k = keys[idx];
+        const std::string& k = keys[idx];
         KvGetStatus gs = kv_store_get(store, 0, k, now_ms, &out);
         if (gs != KvGetStatus::HIT) {
             state.SkipWithError("kv_store_get miss in hit benchmark");
@@ -159,7 +162,8 @@ static void BM_SharedKvSingleGetHit(benchmark::State &state) {
         bytes += static_cast<uint64_t>(k.size()) + out.len;
         now_ms++;
         idx++;
-        if (idx == dataset_size) idx = 0;
+        if (idx == dataset_size)
+            idx = 0;
     }
 
     kv_store_quiescent(store, 0);

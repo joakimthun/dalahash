@@ -12,9 +12,9 @@ struct WorkerConfig {
     int cpu_id;
     uint16_t port;
     IoOps ops;
-    IoBackend *backend;
-    std::atomic<bool> *running;
-    KvStore *shared_store = nullptr;
+    IoBackend* backend;
+    std::atomic<bool>* running;
+    KvStore* shared_store = nullptr;
     uint32_t worker_id = 0;
     uint32_t worker_count = 1;
     // When true, skip core pinning and listen socket creation (for DST).
@@ -22,4 +22,4 @@ struct WorkerConfig {
     int listen_fd = -1; // pre-created listen fd when skip_setup is true
 };
 
-int worker_run(WorkerConfig *config);
+int worker_run(WorkerConfig* config);

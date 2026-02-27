@@ -10,5 +10,5 @@
 #include "store.h"
 #include <cstdint>
 
-uint32_t command_execute(const RespCommand *cmd, Store *store,
-                         uint64_t now_ms, uint8_t *out_buf, uint32_t out_buf_size);
+uint32_t command_execute(const RespCommand* cmd, Store* store, uint64_t now_ms, uint8_t* out_buf,
+                         uint32_t out_buf_size);

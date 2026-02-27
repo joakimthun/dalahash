@@ -12,7 +12,7 @@
 namespace {
 
 struct StressCase {
-    const char *name;
+    const char* name;
     uint32_t threads;
     uint32_t workers;
     uint32_t duration_ms;
@@ -27,7 +27,8 @@ TEST_P(SharedKvStress, SeededConcurrentMatrix) {
     const StressCase c = GetParam();
     uint32_t threads = kvtest::clamp_threads(c.threads);
     uint32_t workers = c.workers == 0 ? 1 : c.workers;
-    if (workers > threads) workers = threads;
+    if (workers > threads)
+        workers = threads;
 
     KvStoreConfig cfg = {
         .capacity_bytes = c.capacity_bytes,
@@ -35,9 +36,10 @@ TEST_P(SharedKvStress, SeededConcurrentMatrix) {
         .buckets_per_shard = 0,
         .worker_count = workers,
     };
-    KvStore *s = kv_store_create(&cfg);
+    KvStore* s = kv_store_create(&cfg);
     ASSERT_NE(s, nullptr);
-    for (uint32_t i = 0; i < workers; i++) ASSERT_EQ(kv_store_register_worker(s, i), 0);
+    for (uint32_t i = 0; i < workers; i++)
+        ASSERT_EQ(kv_store_register_worker(s, i), 0);
 
     std::vector<std::string> keys = kvtest::make_key_space(c.key_count);
     std::atomic<bool> start{false};
@@ -88,8 +90,8 @@ TEST_P(SharedKvStress, SeededConcurrentMatrix) {
                         invalid_status.fetch_add(1, std::memory_order_relaxed);
                 } else if (op < 96) {
                     KvValueView out = {};
-                    KvGetStatus gs = kv_store_get(
-                        s, worker, keys[key_idx], logical_now.load(std::memory_order_acquire), &out);
+                    KvGetStatus gs = kv_store_get(s, worker, keys[key_idx],
+                                                  logical_now.load(std::memory_order_acquire), &out);
                     if (gs == KvGetStatus::HIT) {
                         uint32_t out_tid = 0;
                         uint64_t out_seq = 0, out_salt = 0;
@@ -100,7 +102,8 @@ TEST_P(SharedKvStress, SeededConcurrentMatrix) {
                     kv_store_quiescent(s, worker);
                 }
 
-                if ((seq & 255u) == 0) kv_store_quiescent(s, worker);
+                if ((seq & 255u) == 0)
+                    kv_store_quiescent(s, worker);
             }
 
             kv_store_quiescent(s, worker);
@@ -108,33 +111,28 @@ TEST_P(SharedKvStress, SeededConcurrentMatrix) {
     }
 
     start.store(true, std::memory_order_release);
-    for (auto &t : pool) t.join();
+    for (auto& t : pool)
+        t.join();
 
     EXPECT_EQ(invalid_status.load(std::memory_order_acquire), 0u)
         << "invalid status in stress case: " << c.name;
-    EXPECT_EQ(bad_value.load(std::memory_order_acquire), 0u)
-        << "bad value shape in stress case: " << c.name;
+    EXPECT_EQ(bad_value.load(std::memory_order_acquire), 0u) << "bad value shape in stress case: " << c.name;
     EXPECT_LE(kv_store_live_bytes(s), kv_store_capacity_bytes(s) * 5u)
         << "unexpected live bytes growth in stress case: " << c.name;
-    EXPECT_TRUE(kvtest::converge_to_capacity(
-        s, 0, logical_now.load(std::memory_order_acquire), 3000))
+    EXPECT_TRUE(kvtest::converge_to_capacity(s, 0, logical_now.load(std::memory_order_acquire), 3000))
         << "failed to converge capacity in stress case: " << c.name;
 
     kv_store_destroy(s);
 }
 
-std::string stress_name(const ::testing::TestParamInfo<StressCase> &info) {
-    return info.param.name;
-}
+std::string stress_name(const ::testing::TestParamInfo<StressCase>& info) { return info.param.name; }
 
 INSTANTIATE_TEST_SUITE_P(
     Matrix, SharedKvStress,
-    ::testing::Values(
-        StressCase{"W4_4s", 4, 4, 4000, 1ull << 20, 400, 0x11111111ull},
-        StressCase{"W8_5s", 8, 8, 5000, 2ull << 20, 800, 0x22222222ull},
-        StressCase{"W12_4s", 12, 12, 4000, 2ull << 20, 1200, 0x33333333ull},
-        StressCase{"W16_3s_SmallCap", 16, 16, 3000, 256ull << 10, 1600, 0x44444444ull}),
+    ::testing::Values(StressCase{"W4_4s", 4, 4, 4000, 1ull << 20, 400, 0x11111111ull},
+                      StressCase{"W8_5s", 8, 8, 5000, 2ull << 20, 800, 0x22222222ull},
+                      StressCase{"W12_4s", 12, 12, 4000, 2ull << 20, 1200, 0x33333333ull},
+                      StressCase{"W16_3s_SmallCap", 16, 16, 3000, 256ull << 10, 1600, 0x44444444ull}),
     stress_name);
 
 } // namespace
-

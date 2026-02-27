@@ -117,3 +117,38 @@ add_subdirectory(tests)
 if(ENABLE_BENCHMARKS)
     add_subdirectory(bench)
 endif()
+
+find_program(DALAHASH_CLANG_FORMAT NAMES clang-format-21 clang-format)
+if(DALAHASH_CLANG_FORMAT)
+    file(GLOB_RECURSE DALAHASH_FORMAT_FILES CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/src/*.c"
+        "${CMAKE_SOURCE_DIR}/src/*.cc"
+        "${CMAKE_SOURCE_DIR}/src/*.cpp"
+        "${CMAKE_SOURCE_DIR}/src/*.cxx"
+        "${CMAKE_SOURCE_DIR}/src/*.h"
+        "${CMAKE_SOURCE_DIR}/src/*.hh"
+        "${CMAKE_SOURCE_DIR}/src/*.hpp"
+        "${CMAKE_SOURCE_DIR}/tests/*.c"
+        "${CMAKE_SOURCE_DIR}/tests/*.cc"
+        "${CMAKE_SOURCE_DIR}/tests/*.cpp"
+        "${CMAKE_SOURCE_DIR}/tests/*.cxx"
+        "${CMAKE_SOURCE_DIR}/tests/*.h"
+        "${CMAKE_SOURCE_DIR}/tests/*.hh"
+        "${CMAKE_SOURCE_DIR}/tests/*.hpp"
+        "${CMAKE_SOURCE_DIR}/bench/*.c"
+        "${CMAKE_SOURCE_DIR}/bench/*.cc"
+        "${CMAKE_SOURCE_DIR}/bench/*.cpp"
+        "${CMAKE_SOURCE_DIR}/bench/*.cxx"
+        "${CMAKE_SOURCE_DIR}/bench/*.h"
+        "${CMAKE_SOURCE_DIR}/bench/*.hh"
+        "${CMAKE_SOURCE_DIR}/bench/*.hpp"
+    )
+    add_custom_target(format
+        COMMAND "${DALAHASH_CLANG_FORMAT}" -i -style=file ${DALAHASH_FORMAT_FILES}
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Formatting dalahash C/C++ sources"
+        VERBATIM
+    )
+else()
+    message(STATUS "clang-format not found; 'format' target will not be generated")
+endif()

@@ -16,7 +16,7 @@
 namespace {
 
 struct MultiBenchContext {
-    KvStore *store = nullptr;
+    KvStore* store = nullptr;
     std::vector<std::string> keys;
     std::vector<std::string> values;
     uint32_t dataset_size = 0;
@@ -25,12 +25,13 @@ struct MultiBenchContext {
     uint32_t worker_count = 0;
 };
 
-static MultiBenchContext *g_ctx = nullptr;
+static MultiBenchContext* g_ctx = nullptr;
 static std::mutex g_ctx_mu;
 static std::atomic<uint32_t> g_teardown_count{0};
 
 static uint32_t next_pow2_u32(uint32_t v) {
-    if (v <= 1) return 1;
+    if (v <= 1)
+        return 1;
     v--;
     v |= v >> 1;
     v |= v >> 2;
@@ -42,38 +43,47 @@ static uint32_t next_pow2_u32(uint32_t v) {
 
 static uint32_t derive_shard_count(uint32_t worker_count) {
     uint32_t target = worker_count == 0 ? 1u : worker_count;
-    if (target > UINT32_MAX / 4u) target = UINT32_MAX / 4u;
+    if (target > UINT32_MAX / 4u)
+        target = UINT32_MAX / 4u;
     target *= 4u;
-    if (target < 64u) target = 64u;
+    if (target < 64u)
+        target = 64u;
     return next_pow2_u32(target);
 }
 
 static uint32_t derive_buckets_per_shard(uint64_t capacity_bytes, uint32_t shard_count) {
-    if (shard_count == 0) return 16u;
+    if (shard_count == 0)
+        return 16u;
 
     uint64_t total_buckets = capacity_bytes / 256u;
-    if (total_buckets < 64u) total_buckets = 64u;
+    if (total_buckets < 64u)
+        total_buckets = 64u;
     uint64_t per_shard = total_buckets / shard_count;
-    if (per_shard < 16u) per_shard = 16u;
+    if (per_shard < 16u)
+        per_shard = 16u;
     if (per_shard > static_cast<uint64_t>(UINT32_MAX / 2u)) {
         per_shard = static_cast<uint64_t>(UINT32_MAX / 2u);
     }
 
     uint32_t buckets = next_pow2_u32(static_cast<uint32_t>(per_shard));
-    if (buckets <= UINT32_MAX / 2u) buckets *= 2u;
+    if (buckets <= UINT32_MAX / 2u)
+        buckets *= 2u;
     return buckets;
 }
 
-static void destroy_context(MultiBenchContext *ctx) {
-    if (!ctx) return;
-    if (ctx->store) kv_store_destroy(ctx->store);
+static void destroy_context(MultiBenchContext* ctx) {
+    if (!ctx)
+        return;
+    if (ctx->store)
+        kv_store_destroy(ctx->store);
     delete ctx;
 }
 
-static MultiBenchContext *create_context(uint32_t dataset_size, uint32_t key_size,
-                                         uint32_t value_size, uint32_t worker_count) {
-    MultiBenchContext *ctx = new (std::nothrow) MultiBenchContext();
-    if (!ctx) return nullptr;
+static MultiBenchContext* create_context(uint32_t dataset_size, uint32_t key_size, uint32_t value_size,
+                                         uint32_t worker_count) {
+    MultiBenchContext* ctx = new (std::nothrow) MultiBenchContext();
+    if (!ctx)
+        return nullptr;
 
     ctx->dataset_size = dataset_size;
     ctx->key_size = key_size;
@@ -82,8 +92,7 @@ static MultiBenchContext *create_context(uint32_t dataset_size, uint32_t key_siz
     ctx->keys = kvbench::make_corpus(dataset_size, key_size, 0x6d756c74695f31ull, true);
     ctx->values = kvbench::make_corpus(dataset_size, value_size, 0x6d756c74695f32ull, false);
 
-    const uint64_t capacity_bytes =
-        kvbench::derive_capacity_bytes(dataset_size, key_size, value_size);
+    const uint64_t capacity_bytes = kvbench::derive_capacity_bytes(dataset_size, key_size, value_size);
     const uint32_t shard_count = derive_shard_count(worker_count);
     const uint32_t buckets_per_shard = derive_buckets_per_shard(capacity_bytes, shard_count);
 
@@ -120,24 +129,26 @@ static MultiBenchContext *create_context(uint32_t dataset_size, uint32_t key_siz
     return ctx;
 }
 
-static bool parse_sizes(const benchmark::State &state, uint32_t *dataset_size,
-                        uint32_t *key_size, uint32_t *value_size) {
-    if (!dataset_size || !key_size || !value_size) return false;
-    if (state.range(0) <= 0 || state.range(1) <= 0 || state.range(2) <= 0) return false;
+static bool parse_sizes(const benchmark::State& state, uint32_t* dataset_size, uint32_t* key_size,
+                        uint32_t* value_size) {
+    if (!dataset_size || !key_size || !value_size)
+        return false;
+    if (state.range(0) <= 0 || state.range(1) <= 0 || state.range(2) <= 0)
+        return false;
     *dataset_size = static_cast<uint32_t>(state.range(0));
     *key_size = static_cast<uint32_t>(state.range(1));
     *value_size = static_cast<uint32_t>(state.range(2));
     return true;
 }
 
-static void add_baseline_args(benchmark::internal::Benchmark *b) {
+static void add_baseline_args(benchmark::internal::Benchmark* b) {
     b->Args({4096, 16, 64});
     b->Args({4096, 16, 256});
     b->Args({16384, 24, 128});
     b->Args({65536, 32, 256});
 }
 
-static void add_large_dataset_args(benchmark::internal::Benchmark *b) {
+static void add_large_dataset_args(benchmark::internal::Benchmark* b) {
     b->Args({2000000, 16, 64});
     b->Args({4000000, 16, 64});
     b->Args({8000000, 16, 64});
@@ -146,30 +157,29 @@ static void add_large_dataset_args(benchmark::internal::Benchmark *b) {
     b->Args({8000000, 24, 128});
 }
 
-static void add_larger_key_value_dataset_args(benchmark::internal::Benchmark *b) {
+static void add_larger_key_value_dataset_args(benchmark::internal::Benchmark* b) {
     b->Args({4000000, 128, 256});
 }
 
-static void add_all_args(benchmark::internal::Benchmark *b) {
+static void add_all_args(benchmark::internal::Benchmark* b) {
     add_baseline_args(b);
     add_large_dataset_args(b);
     add_larger_key_value_dataset_args(b);
 }
 
-static void add_v2_stats(benchmark::State &state, KvStore *store) {
+static void add_v2_stats(benchmark::State& state, KvStore* store) {
 #if defined(DALAHASH_KV_IMPL_V2)
     KvStoreInternalStats stats = {};
-    if (!kv_store_internal_stats_snapshot(store, &stats)) return;
+    if (!kv_store_internal_stats_snapshot(store, &stats))
+        return;
     static constexpr auto kAvg = benchmark::Counter::kAvgThreads;
     state.counters["v2_set_calls"] = benchmark::Counter(static_cast<double>(stats.set_calls), kAvg);
     state.counters["v2_set_same_size"] =
         benchmark::Counter(static_cast<double>(stats.set_overwrite_same_size), kAvg);
     state.counters["v2_set_size_change"] =
         benchmark::Counter(static_cast<double>(stats.set_overwrite_size_change), kAvg);
-    state.counters["v2_set_inserts"] =
-        benchmark::Counter(static_cast<double>(stats.set_inserts), kAvg);
-    state.counters["v2_set_evictions"] =
-        benchmark::Counter(static_cast<double>(stats.set_evictions), kAvg);
+    state.counters["v2_set_inserts"] = benchmark::Counter(static_cast<double>(stats.set_inserts), kAvg);
+    state.counters["v2_set_evictions"] = benchmark::Counter(static_cast<double>(stats.set_evictions), kAvg);
     state.counters["v2_set_cas_failures"] =
         benchmark::Counter(static_cast<double>(stats.set_cas_failures), kAvg);
     state.counters["v2_set_allocations"] =
@@ -191,22 +201,23 @@ static void add_v2_stats(benchmark::State &state, KvStore *store) {
 }
 
 class SharedKvMultiFixture : public benchmark::Fixture {
-public:
-    void SetUp(const benchmark::State &state) override {
+  public:
+    void SetUp(const benchmark::State& state) override {
         uint32_t dataset_size = 0;
         uint32_t key_size = 0;
         uint32_t value_size = 0;
-        if (!parse_sizes(state, &dataset_size, &key_size, &value_size)) return;
+        if (!parse_sizes(state, &dataset_size, &key_size, &value_size))
+            return;
 
         std::lock_guard<std::mutex> lock(g_ctx_mu);
         if (!g_ctx) {
-            g_ctx = create_context(
-                dataset_size, key_size, value_size, static_cast<uint32_t>(state.threads()));
+            g_ctx =
+                create_context(dataset_size, key_size, value_size, static_cast<uint32_t>(state.threads()));
             g_teardown_count.store(0, std::memory_order_release);
         }
     }
 
-    void TearDown(const benchmark::State &state) override {
+    void TearDown(const benchmark::State& state) override {
         const uint32_t finished = g_teardown_count.fetch_add(1, std::memory_order_acq_rel) + 1u;
         if (finished == static_cast<uint32_t>(state.threads())) {
             std::lock_guard<std::mutex> lock(g_ctx_mu);
@@ -217,7 +228,7 @@ public:
     }
 };
 
-BENCHMARK_DEFINE_F(SharedKvMultiFixture, Mixed80_20)(benchmark::State &state) {
+BENCHMARK_DEFINE_F(SharedKvMultiFixture, Mixed80_20)(benchmark::State& state) {
     if (!g_ctx || !g_ctx->store || g_ctx->keys.empty() || g_ctx->values.empty()) {
         state.SkipWithError("multi benchmark context setup failed");
         return;
@@ -225,10 +236,9 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, Mixed80_20)(benchmark::State &state) {
 
     const uint32_t worker_id = static_cast<uint32_t>(state.thread_index());
     const uint64_t base_seed =
-        kvbench::mix_seed(0x6d756c74695f7277ull,
-                          static_cast<uint64_t>(g_ctx->dataset_size) ^
-                              (static_cast<uint64_t>(g_ctx->key_size) << 21u) ^
-                              (static_cast<uint64_t>(g_ctx->value_size) << 42u));
+        kvbench::mix_seed(0x6d756c74695f7277ull, static_cast<uint64_t>(g_ctx->dataset_size) ^
+                                                     (static_cast<uint64_t>(g_ctx->key_size) << 21u) ^
+                                                     (static_cast<uint64_t>(g_ctx->value_size) << 42u));
     kvbench::XorShift64 rng(kvbench::mix_seed(base_seed, worker_id + 1u));
 
     uint64_t read_ops = 0;
@@ -241,7 +251,7 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, Mixed80_20)(benchmark::State &state) {
         (void)_;
         const uint64_t r = rng.next();
         const uint32_t key_idx = static_cast<uint32_t>(r % g_ctx->keys.size());
-        const std::string &key = g_ctx->keys[key_idx];
+        const std::string& key = g_ctx->keys[key_idx];
 
         if ((r % 10u) < 8u) {
             KvValueView out = {};
@@ -256,7 +266,7 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, Mixed80_20)(benchmark::State &state) {
             bytes += static_cast<uint64_t>(key.size()) + out.len;
         } else {
             const uint32_t value_idx = static_cast<uint32_t>(rng.next() % g_ctx->values.size());
-            const std::string &value = g_ctx->values[value_idx];
+            const std::string& value = g_ctx->values[value_idx];
             KvSetStatus st = kv_store_set(g_ctx->store, worker_id, key, value, now_ms, nullptr);
             if (st != KvSetStatus::OK) {
                 state.SkipWithError("kv_store_set failed in mixed benchmark");
@@ -268,7 +278,8 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, Mixed80_20)(benchmark::State &state) {
 
         now_ms++;
         q_count++;
-        if ((q_count & 255u) == 0u) kv_store_quiescent(g_ctx->store, worker_id);
+        if ((q_count & 255u) == 0u)
+            kv_store_quiescent(g_ctx->store, worker_id);
     }
 
     kv_store_quiescent(g_ctx->store, worker_id);
@@ -281,7 +292,7 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, Mixed80_20)(benchmark::State &state) {
     add_v2_stats(state, g_ctx->store);
 }
 
-BENCHMARK_DEFINE_F(SharedKvMultiFixture, Get100)(benchmark::State &state) {
+BENCHMARK_DEFINE_F(SharedKvMultiFixture, Get100)(benchmark::State& state) {
     if (!g_ctx || !g_ctx->store || g_ctx->keys.empty()) {
         state.SkipWithError("multi benchmark context setup failed");
         return;
@@ -289,10 +300,9 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, Get100)(benchmark::State &state) {
 
     const uint32_t worker_id = static_cast<uint32_t>(state.thread_index());
     const uint64_t base_seed =
-        kvbench::mix_seed(0x6d756c74695f726full,
-                          static_cast<uint64_t>(g_ctx->dataset_size) ^
-                              (static_cast<uint64_t>(g_ctx->key_size) << 21u) ^
-                              (static_cast<uint64_t>(g_ctx->value_size) << 42u));
+        kvbench::mix_seed(0x6d756c74695f726full, static_cast<uint64_t>(g_ctx->dataset_size) ^
+                                                     (static_cast<uint64_t>(g_ctx->key_size) << 21u) ^
+                                                     (static_cast<uint64_t>(g_ctx->value_size) << 42u));
     kvbench::XorShift64 rng(kvbench::mix_seed(base_seed, worker_id + 1u));
 
     uint64_t read_ops = 0;
@@ -304,7 +314,7 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, Get100)(benchmark::State &state) {
         (void)_;
         const uint64_t r = rng.next();
         const uint32_t key_idx = static_cast<uint32_t>(r % g_ctx->keys.size());
-        const std::string &key = g_ctx->keys[key_idx];
+        const std::string& key = g_ctx->keys[key_idx];
 
         KvValueView out = {};
         KvGetStatus gs = kv_store_get(g_ctx->store, worker_id, key, now_ms, &out);
@@ -320,7 +330,8 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, Get100)(benchmark::State &state) {
 
         now_ms++;
         q_count++;
-        if ((q_count & 255u) == 0u) kv_store_quiescent(g_ctx->store, worker_id);
+        if ((q_count & 255u) == 0u)
+            kv_store_quiescent(g_ctx->store, worker_id);
     }
 
     kv_store_quiescent(g_ctx->store, worker_id);
@@ -332,7 +343,7 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, Get100)(benchmark::State &state) {
     add_v2_stats(state, g_ctx->store);
 }
 
-BENCHMARK_DEFINE_F(SharedKvMultiFixture, Set100Overwrite)(benchmark::State &state) {
+BENCHMARK_DEFINE_F(SharedKvMultiFixture, Set100Overwrite)(benchmark::State& state) {
     if (!g_ctx || !g_ctx->store || g_ctx->keys.empty() || g_ctx->values.empty()) {
         state.SkipWithError("multi benchmark context setup failed");
         return;
@@ -340,10 +351,9 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, Set100Overwrite)(benchmark::State &stat
 
     const uint32_t worker_id = static_cast<uint32_t>(state.thread_index());
     const uint64_t base_seed =
-        kvbench::mix_seed(0x6d756c74695f7365ull,
-                          static_cast<uint64_t>(g_ctx->dataset_size) ^
-                              (static_cast<uint64_t>(g_ctx->key_size) << 21u) ^
-                              (static_cast<uint64_t>(g_ctx->value_size) << 42u));
+        kvbench::mix_seed(0x6d756c74695f7365ull, static_cast<uint64_t>(g_ctx->dataset_size) ^
+                                                     (static_cast<uint64_t>(g_ctx->key_size) << 21u) ^
+                                                     (static_cast<uint64_t>(g_ctx->value_size) << 42u));
     kvbench::XorShift64 rng(kvbench::mix_seed(base_seed, worker_id + 1u));
 
     uint64_t write_ops = 0;
@@ -355,8 +365,8 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, Set100Overwrite)(benchmark::State &stat
         (void)_;
         const uint32_t key_idx = static_cast<uint32_t>(rng.next() % g_ctx->keys.size());
         const uint32_t value_idx = static_cast<uint32_t>(rng.next() % g_ctx->values.size());
-        const std::string &key = g_ctx->keys[key_idx];
-        const std::string &value = g_ctx->values[value_idx];
+        const std::string& key = g_ctx->keys[key_idx];
+        const std::string& value = g_ctx->values[value_idx];
 
         KvSetStatus st = kv_store_set(g_ctx->store, worker_id, key, value, now_ms, nullptr);
         if (st != KvSetStatus::OK) {
@@ -368,7 +378,8 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, Set100Overwrite)(benchmark::State &stat
         bytes += static_cast<uint64_t>(key.size() + value.size());
         now_ms++;
         q_count++;
-        if ((q_count & 255u) == 0u) kv_store_quiescent(g_ctx->store, worker_id);
+        if ((q_count & 255u) == 0u)
+            kv_store_quiescent(g_ctx->store, worker_id);
     }
 
     kv_store_quiescent(g_ctx->store, worker_id);
@@ -385,10 +396,7 @@ BENCHMARK_REGISTER_F(SharedKvMultiFixture, Mixed80_20)
     ->ThreadRange(1, 16)
     ->UseRealTime();
 
-BENCHMARK_REGISTER_F(SharedKvMultiFixture, Get100)
-    ->Apply(add_all_args)
-    ->ThreadRange(1, 16)
-    ->UseRealTime();
+BENCHMARK_REGISTER_F(SharedKvMultiFixture, Get100)->Apply(add_all_args)->ThreadRange(1, 16)->UseRealTime();
 
 BENCHMARK_REGISTER_F(SharedKvMultiFixture, Set100Overwrite)
     ->Apply(add_all_args)

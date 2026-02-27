@@ -30,7 +30,7 @@
 static constexpr int RESP_MAX_ARGS = 8;
 
 struct RespArg {
-    const uint8_t *data; // points into the receive buffer (zero-copy)
+    const uint8_t* data; // points into the receive buffer (zero-copy)
     uint32_t len;        // byte count, excludes trailing \r\n
 };
 
@@ -46,13 +46,12 @@ struct RespCommand {
 // On OK:       *cmd is populated, *consumed = bytes forming this command.
 // On INCOMPLETE: *consumed = 0, caller should buffer and retry with more data.
 // On ERROR:    malformed RESP (wrong type byte, too many args, etc.).
-RespParseResult resp_parse(const uint8_t *data, uint32_t len,
-                           RespCommand *cmd, uint32_t *consumed);
+RespParseResult resp_parse(const uint8_t* data, uint32_t len, RespCommand* cmd, uint32_t* consumed);
 
 //  Response writers — each serialises one RESP value into out[] and returns
 // the number of bytes written. Callers must ensure out[] is large enough.
-uint32_t resp_write_ok(uint8_t *out);    // +OK\r\n       (5 bytes)
-uint32_t resp_write_null(uint8_t *out);  // $-1\r\n       (5 bytes)
-uint32_t resp_write_pong(uint8_t *out);  // +PONG\r\n     (7 bytes)
-uint32_t resp_write_bulk(uint8_t *out, const uint8_t *data, uint32_t len);
-uint32_t resp_write_error(uint8_t *out, const char *msg);
+uint32_t resp_write_ok(uint8_t* out);   // +OK\r\n       (5 bytes)
+uint32_t resp_write_null(uint8_t* out); // $-1\r\n       (5 bytes)
+uint32_t resp_write_pong(uint8_t* out); // +PONG\r\n     (7 bytes)
+uint32_t resp_write_bulk(uint8_t* out, const uint8_t* data, uint32_t len);
+uint32_t resp_write_error(uint8_t* out, const char* msg);
