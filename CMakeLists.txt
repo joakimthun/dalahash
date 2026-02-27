@@ -15,6 +15,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(DALAHASH_PROTOCOL "redis" CACHE STRING "Application protocol")
 set_property(CACHE DALAHASH_PROTOCOL PROPERTY STRINGS redis echo)
 
+# Shared KV implementation selection.
+set(DALAHASH_KV_IMPL "v2" CACHE STRING "Shared KV implementation")
+set_property(CACHE DALAHASH_KV_IMPL PROPERTY STRINGS v1 v2)
+
 # Global compiler flags: no exceptions, enable warnings
 add_compile_options(-fno-exceptions -Wall -Wextra)
 
@@ -65,9 +69,18 @@ find_path(URING_INCLUDE liburing.h REQUIRED)
 
 # Core library — all dalahash logic except main(). Linked by both the
 # executable and test targets so tests can access internal functions.
+set(DALAHASH_KV_SOURCE src/kv/shared_kv_store.cpp)
+if(DALAHASH_KV_IMPL STREQUAL "v1")
+    set(DALAHASH_KV_SOURCE src/kv/shared_kv_store.cpp)
+elseif(DALAHASH_KV_IMPL STREQUAL "v2")
+    set(DALAHASH_KV_SOURCE src/kv/shared_kv_store_v2.cpp)
+else()
+    message(FATAL_ERROR "Unsupported DALAHASH_KV_IMPL: ${DALAHASH_KV_IMPL}")
+endif()
+
 add_library(dalahash_lib STATIC
     src/base/assert.cpp
-    src/kv/shared_kv_store.cpp
+    ${DALAHASH_KV_SOURCE}
     src/redis/resp.cpp
     src/redis/command.cpp
     src/net/io_uring_backend.cpp
@@ -79,6 +92,8 @@ target_include_directories(dalahash_lib PUBLIC src ${URING_INCLUDE})
 target_link_libraries(dalahash_lib PUBLIC ${URING_LIB} pthread)
 target_compile_definitions(dalahash_lib PUBLIC
     $<$<CONFIG:Debug>:DALAHASH_DEBUG_ASSERTS=1>
+    $<$<STREQUAL:${DALAHASH_KV_IMPL},v1>:DALAHASH_KV_IMPL_V1=1>
+    $<$<STREQUAL:${DALAHASH_KV_IMPL},v2>:DALAHASH_KV_IMPL_V2=1>
 )
 
 if(DALAHASH_PROTOCOL STREQUAL "redis")

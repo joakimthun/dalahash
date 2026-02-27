@@ -1,6 +1,7 @@
 #include "shared_kv_bench_common.h"
 
 #include "kv/shared_kv_store.h"
+#include "kv/shared_kv_store_internal_stats.h"
 
 #include <benchmark/benchmark.h>
 
@@ -115,6 +116,7 @@ static MultiBenchContext *create_context(uint32_t dataset_size, uint32_t key_siz
         now_ms++;
     }
     kv_store_quiescent(ctx->store, 0);
+    (void)kv_store_internal_stats_reset(ctx->store);
     return ctx;
 }
 
@@ -152,6 +154,40 @@ static void add_all_args(benchmark::internal::Benchmark *b) {
     add_baseline_args(b);
     add_large_dataset_args(b);
     add_larger_key_value_dataset_args(b);
+}
+
+static void add_v2_stats(benchmark::State &state, KvStore *store) {
+#if defined(DALAHASH_KV_IMPL_V2)
+    KvStoreInternalStats stats = {};
+    if (!kv_store_internal_stats_snapshot(store, &stats)) return;
+    static constexpr auto kAvg = benchmark::Counter::kAvgThreads;
+    state.counters["v2_set_calls"] = benchmark::Counter(static_cast<double>(stats.set_calls), kAvg);
+    state.counters["v2_set_same_size"] =
+        benchmark::Counter(static_cast<double>(stats.set_overwrite_same_size), kAvg);
+    state.counters["v2_set_size_change"] =
+        benchmark::Counter(static_cast<double>(stats.set_overwrite_size_change), kAvg);
+    state.counters["v2_set_inserts"] =
+        benchmark::Counter(static_cast<double>(stats.set_inserts), kAvg);
+    state.counters["v2_set_evictions"] =
+        benchmark::Counter(static_cast<double>(stats.set_evictions), kAvg);
+    state.counters["v2_set_cas_failures"] =
+        benchmark::Counter(static_cast<double>(stats.set_cas_failures), kAvg);
+    state.counters["v2_set_allocations"] =
+        benchmark::Counter(static_cast<double>(stats.set_allocations), kAvg);
+    state.counters["v2_quiescent_calls"] =
+        benchmark::Counter(static_cast<double>(stats.quiescent_calls), kAvg);
+    state.counters["v2_quiescent_fast"] =
+        benchmark::Counter(static_cast<double>(stats.quiescent_fast_returns), kAvg);
+    state.counters["v2_retire_batches"] =
+        benchmark::Counter(static_cast<double>(stats.retire_batches_enqueued), kAvg);
+    state.counters["v2_retired_nodes"] =
+        benchmark::Counter(static_cast<double>(stats.retired_nodes_enqueued), kAvg);
+    state.counters["v2_maintenance_runs"] =
+        benchmark::Counter(static_cast<double>(stats.maintenance_runs), kAvg);
+#else
+    (void)state;
+    (void)store;
+#endif
 }
 
 class SharedKvMultiFixture : public benchmark::Fixture {
@@ -242,6 +278,7 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, Mixed80_20)(benchmark::State &state) {
         benchmark::Counter(static_cast<double>(read_ops), benchmark::Counter::kIsRate);
     state.counters["write_ops"] =
         benchmark::Counter(static_cast<double>(write_ops), benchmark::Counter::kIsRate);
+    add_v2_stats(state, g_ctx->store);
 }
 
 BENCHMARK_DEFINE_F(SharedKvMultiFixture, Get100)(benchmark::State &state) {
@@ -292,6 +329,55 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, Get100)(benchmark::State &state) {
     state.counters["read_ops"] =
         benchmark::Counter(static_cast<double>(read_ops), benchmark::Counter::kIsRate);
     state.counters["write_ops"] = benchmark::Counter(0.0, benchmark::Counter::kIsRate);
+    add_v2_stats(state, g_ctx->store);
+}
+
+BENCHMARK_DEFINE_F(SharedKvMultiFixture, Set100Overwrite)(benchmark::State &state) {
+    if (!g_ctx || !g_ctx->store || g_ctx->keys.empty() || g_ctx->values.empty()) {
+        state.SkipWithError("multi benchmark context setup failed");
+        return;
+    }
+
+    const uint32_t worker_id = static_cast<uint32_t>(state.thread_index());
+    const uint64_t base_seed =
+        kvbench::mix_seed(0x6d756c74695f7365ull,
+                          static_cast<uint64_t>(g_ctx->dataset_size) ^
+                              (static_cast<uint64_t>(g_ctx->key_size) << 21u) ^
+                              (static_cast<uint64_t>(g_ctx->value_size) << 42u));
+    kvbench::XorShift64 rng(kvbench::mix_seed(base_seed, worker_id + 1u));
+
+    uint64_t write_ops = 0;
+    uint64_t bytes = 0;
+    uint32_t q_count = 0;
+    uint64_t now_ms = 1000u + worker_id;
+
+    for (auto _ : state) {
+        (void)_;
+        const uint32_t key_idx = static_cast<uint32_t>(rng.next() % g_ctx->keys.size());
+        const uint32_t value_idx = static_cast<uint32_t>(rng.next() % g_ctx->values.size());
+        const std::string &key = g_ctx->keys[key_idx];
+        const std::string &value = g_ctx->values[value_idx];
+
+        KvSetStatus st = kv_store_set(g_ctx->store, worker_id, key, value, now_ms, nullptr);
+        if (st != KvSetStatus::OK) {
+            state.SkipWithError("kv_store_set failed in set100overwrite benchmark");
+            break;
+        }
+
+        write_ops++;
+        bytes += static_cast<uint64_t>(key.size() + value.size());
+        now_ms++;
+        q_count++;
+        if ((q_count & 255u) == 0u) kv_store_quiescent(g_ctx->store, worker_id);
+    }
+
+    kv_store_quiescent(g_ctx->store, worker_id);
+    state.SetItemsProcessed(static_cast<int64_t>(write_ops));
+    state.SetBytesProcessed(static_cast<int64_t>(bytes));
+    state.counters["read_ops"] = benchmark::Counter(0.0, benchmark::Counter::kIsRate);
+    state.counters["write_ops"] =
+        benchmark::Counter(static_cast<double>(write_ops), benchmark::Counter::kIsRate);
+    add_v2_stats(state, g_ctx->store);
 }
 
 BENCHMARK_REGISTER_F(SharedKvMultiFixture, Mixed80_20)
@@ -300,6 +386,11 @@ BENCHMARK_REGISTER_F(SharedKvMultiFixture, Mixed80_20)
     ->UseRealTime();
 
 BENCHMARK_REGISTER_F(SharedKvMultiFixture, Get100)
+    ->Apply(add_all_args)
+    ->ThreadRange(1, 16)
+    ->UseRealTime();
+
+BENCHMARK_REGISTER_F(SharedKvMultiFixture, Set100Overwrite)
     ->Apply(add_all_args)
     ->ThreadRange(1, 16)
     ->UseRealTime();

@@ -9,6 +9,8 @@ build-lsan/
 build_lsan/
 build-asan/
 build_asan/
+build-perf/
+build_perf/
 bench/results/
 *.local.json
 notes.txt

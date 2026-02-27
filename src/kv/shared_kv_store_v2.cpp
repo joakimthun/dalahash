@@ -1,4 +1,4 @@
-// shared_kv_store.cpp
+// shared_kv_store_v2.cpp
 //
 // Design summary:
 //   - Sharded hash table with 2-bucket lookup and 4 slots per bucket.
@@ -34,6 +34,13 @@ static constexpr uint32_t KV_TOUCH_SAMPLE_MASK = 0x7;
 static constexpr uint32_t KV_GROW_BATCH = 64;
 static constexpr uint8_t KV_CLASS_LARGE = 0xFF;
 static constexpr uint32_t KV_CLASS_COUNT = 10;
+static constexpr uint32_t RETIRE_BATCH_MAX_NODES = 64;
+static constexpr uint32_t RETIRE_BATCH_MAX_BYTES = 32u << 10;
+static constexpr uint32_t MAINTENANCE_TRIGGER_BATCHES = 8;
+static constexpr uint64_t MAINTENANCE_TRIGGER_BYTES = 128ull << 10;
+static constexpr uint32_t MAINTENANCE_MAX_BATCHES = 8;
+static constexpr uint32_t MAINTENANCE_MAX_NODES = 256;
+static constexpr uint32_t MAINTENANCE_MAX_BYTES = 128u << 10;
 // Size classes for Node allocations (bytes). Larger nodes use malloc/free.
 static constexpr uint32_t KV_CLASS_SIZES[KV_CLASS_COUNT] = {
     64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768
@@ -71,6 +78,15 @@ struct PoolBlock {
     void *mem;
 };
 
+struct RetireBatch {
+    RetireBatch *next;
+    Node *head;
+    Node *tail;
+    uint64_t retire_epoch;
+    uint32_t node_count;
+    uint32_t byte_count;
+};
+
 // One lock-free size class allocator.
 //
 // alignas(64) keeps hot heads from sharing cache lines with neighbors.
@@ -90,11 +106,28 @@ struct LocalClassCache {
     uint32_t count;
 };
 
+struct KvStoreStats {
+    std::atomic<uint64_t> set_calls;
+    std::atomic<uint64_t> set_overwrite_same_size;
+    std::atomic<uint64_t> set_overwrite_size_change;
+    std::atomic<uint64_t> set_inserts;
+    std::atomic<uint64_t> set_evictions;
+    std::atomic<uint64_t> set_cas_failures;
+    std::atomic<uint64_t> set_allocations;
+    std::atomic<uint64_t> quiescent_calls;
+    std::atomic<uint64_t> quiescent_fast_returns;
+    std::atomic<uint64_t> retire_batches_enqueued;
+    std::atomic<uint64_t> retired_nodes_enqueued;
+    std::atomic<uint64_t> maintenance_runs;
+    std::atomic<uint64_t> maintenance_nodes_freed;
+    std::atomic<uint64_t> maintenance_batches_freed;
+};
+
 // Per-worker cooperative reclamation state.
 //
 // Each worker owns its retired list to avoid shared-list contention.
 struct alignas(64) WorkerState {
-    std::atomic<uint64_t> quiescent_seq;
+    std::atomic<uint64_t> quiescent_epoch;
     std::atomic<uint8_t> registered;
     uint8_t reserved0;
     uint8_t reserved1;
@@ -105,7 +138,7 @@ struct alignas(64) WorkerState {
     // Accumulated live_bytes delta since last flush to global.
     // Positive means net growth, negative means net shrinkage.
     int64_t local_live_delta;
-    Node *retired_head;
+    RetireBatch *open_batch;
     LocalClassCache local_caches[KV_CLASS_COUNT];
 };
 
@@ -128,9 +161,15 @@ struct KvStore {
     uint32_t worker_count;
     WorkerState *workers;
     std::atomic<uint64_t> global_epoch;
-    // Cached min epoch to avoid scanning all workers every quiescent call.
-    std::atomic<uint64_t> cached_min_epoch;
+    std::atomic<uint64_t> pending_retired_bytes;
+    std::atomic<uint32_t> pending_retire_batches;
+    std::atomic<uint8_t> over_capacity;
+    std::atomic<uint8_t> maintenance_token;
+    std::atomic_flag retire_queue_lock;
+    RetireBatch *retire_queue_head;
+    RetireBatch *retire_queue_tail;
     ClassPool pools[KV_CLASS_COUNT];
+    KvStoreStats stats;
 };
 
 // Round up to next power-of-two (min 1).
@@ -261,6 +300,51 @@ static WorkerState *worker_state_registered(KvStore *store, uint32_t worker_id) 
     if (!ws) return nullptr;
     if (!ws->registered.load(std::memory_order_acquire)) return nullptr;
     return ws;
+}
+
+static void stats_zero(KvStoreStats *stats) {
+    ASSERT(stats != nullptr, "stats_zero requires stats");
+    stats->set_calls.store(0, std::memory_order_relaxed);
+    stats->set_overwrite_same_size.store(0, std::memory_order_relaxed);
+    stats->set_overwrite_size_change.store(0, std::memory_order_relaxed);
+    stats->set_inserts.store(0, std::memory_order_relaxed);
+    stats->set_evictions.store(0, std::memory_order_relaxed);
+    stats->set_cas_failures.store(0, std::memory_order_relaxed);
+    stats->set_allocations.store(0, std::memory_order_relaxed);
+    stats->quiescent_calls.store(0, std::memory_order_relaxed);
+    stats->quiescent_fast_returns.store(0, std::memory_order_relaxed);
+    stats->retire_batches_enqueued.store(0, std::memory_order_relaxed);
+    stats->retired_nodes_enqueued.store(0, std::memory_order_relaxed);
+    stats->maintenance_runs.store(0, std::memory_order_relaxed);
+    stats->maintenance_nodes_freed.store(0, std::memory_order_relaxed);
+    stats->maintenance_batches_freed.store(0, std::memory_order_relaxed);
+}
+
+static void retire_queue_lock(KvStore *store) {
+    ASSERT(store != nullptr, "retire_queue_lock requires store");
+    while (store->retire_queue_lock.test_and_set(std::memory_order_acquire)) {}
+}
+
+static void retire_queue_unlock(KvStore *store) {
+    ASSERT(store != nullptr, "retire_queue_unlock requires store");
+    store->retire_queue_lock.clear(std::memory_order_release);
+}
+
+static RetireBatch *retire_batch_alloc() {
+    auto *batch = static_cast<RetireBatch *>(std::malloc(sizeof(RetireBatch)));
+    if (!batch) return nullptr;
+    batch->next = nullptr;
+    batch->head = nullptr;
+    batch->tail = nullptr;
+    batch->retire_epoch = 0;
+    batch->node_count = 0;
+    batch->byte_count = 0;
+    return batch;
+}
+
+static void retire_batch_free(RetireBatch *batch) {
+    if (!batch) return;
+    std::free(batch);
 }
 
 // Select smallest class that can hold size; -1 => large path.
@@ -485,16 +569,78 @@ static void node_free(KvStore *store, uint32_t worker_id, Node *node) {
                                                     std::memory_order_relaxed));
 }
 
+static void retire_batch_enqueue(KvStore *store, RetireBatch *batch) {
+    ASSERT(store != nullptr, "retire_batch_enqueue requires store");
+    ASSERT(batch != nullptr, "retire_batch_enqueue requires batch");
+    ASSERT(batch->head != nullptr, "retire batch must have nodes");
+    ASSERT(batch->tail != nullptr, "retire batch must have tail");
+    batch->next = nullptr;
+    batch->retire_epoch = store->global_epoch.load(std::memory_order_acquire);
+
+    retire_queue_lock(store);
+    if (store->retire_queue_tail) {
+        store->retire_queue_tail->next = batch;
+    } else {
+        store->retire_queue_head = batch;
+    }
+    store->retire_queue_tail = batch;
+    retire_queue_unlock(store);
+
+    store->pending_retire_batches.fetch_add(1, std::memory_order_relaxed);
+    store->pending_retired_bytes.fetch_add(batch->byte_count, std::memory_order_relaxed);
+    store->stats.retire_batches_enqueued.fetch_add(1, std::memory_order_relaxed);
+    store->stats.retired_nodes_enqueued.fetch_add(batch->node_count, std::memory_order_relaxed);
+}
+
+static bool retire_batch_is_full(const RetireBatch *batch) {
+    ASSERT(batch != nullptr, "retire_batch_is_full requires batch");
+    return batch->node_count >= RETIRE_BATCH_MAX_NODES ||
+           batch->byte_count >= RETIRE_BATCH_MAX_BYTES;
+}
+
+static bool retire_batch_open(KvStore *store, WorkerState *ws) {
+    ASSERT(store != nullptr, "retire_batch_open requires store");
+    ASSERT(ws != nullptr, "retire_batch_open requires worker");
+    if (ws->open_batch) return true;
+    ws->open_batch = retire_batch_alloc();
+    return ws->open_batch != nullptr;
+}
+
+static void retire_batch_flush_open(KvStore *store, WorkerState *ws) {
+    ASSERT(store != nullptr, "retire_batch_flush_open requires store");
+    ASSERT(ws != nullptr, "retire_batch_flush_open requires worker");
+    RetireBatch *batch = ws->open_batch;
+    if (!batch) return;
+    if (!batch->head || batch->node_count == 0) return;
+    ws->open_batch = nullptr;
+    retire_batch_enqueue(store, batch);
+}
+
 static void retire_node(KvStore *store, uint32_t worker_id, Node *node) {
     if (!store || !node) return;
     WorkerState *ws = worker_state_registered(store, worker_id);
     ASSERT(ws != nullptr, "retire_node requires registered worker");
     if (!ws) return;
-    // Stamp with current epoch (read-only); epoch is bumped in kv_store_quiescent.
-    node->retire_seq = store->global_epoch.load(std::memory_order_acquire);
-    // Worker-local retired list avoids global lock contention.
-    node->gc_next = ws->retired_head;
-    ws->retired_head = node;
+    if (!retire_batch_open(store, ws)) {
+        ASSERT(false, "retire batch allocation failed");
+        return;
+    }
+
+    RetireBatch *batch = ws->open_batch;
+    node->retire_seq = 0;
+    node->gc_next = nullptr;
+    if (batch->tail) {
+        batch->tail->gc_next = node;
+    } else {
+        batch->head = node;
+    }
+    batch->tail = node;
+    batch->node_count++;
+    batch->byte_count += node->alloc_size;
+
+    if (retire_batch_is_full(batch)) {
+        retire_batch_flush_open(store, ws);
+    }
 }
 
 static bool evict_one_from_shard(KvStore *store, uint32_t worker_id,
@@ -556,6 +702,83 @@ static void flush_live_delta(KvStore *store, WorkerState *ws) {
     ws->local_live_delta = 0;
 }
 
+static bool maintenance_should_run(KvStore *store, WorkerState *ws) {
+    ASSERT(store != nullptr, "maintenance_should_run requires store");
+    ASSERT(ws != nullptr, "maintenance_should_run requires worker");
+    uint32_t pending_batches = store->pending_retire_batches.load(std::memory_order_acquire);
+    if (pending_batches == 0) return false;
+    if (pending_batches >= MAINTENANCE_TRIGGER_BATCHES) return true;
+    uint64_t pending_bytes = store->pending_retired_bytes.load(std::memory_order_acquire);
+    if (pending_bytes >= MAINTENANCE_TRIGGER_BYTES) return true;
+    return (ws->quiescent_counter & 0x3Fu) == 0u;
+}
+
+static void maintenance_run(KvStore *store, uint32_t worker_id) {
+    ASSERT(store != nullptr, "maintenance_run requires store");
+    store->stats.maintenance_runs.fetch_add(1, std::memory_order_relaxed);
+
+    uint64_t cur = store->global_epoch.fetch_add(1, std::memory_order_acq_rel) + 1u;
+    uint64_t min_epoch = cur;
+    for (uint32_t i = 0; i < store->worker_count; i++) {
+        if (!store->workers[i].registered.load(std::memory_order_acquire)) continue;
+        uint64_t q = store->workers[i].quiescent_epoch.load(std::memory_order_acquire);
+        if (q < min_epoch) min_epoch = q;
+    }
+
+    RetireBatch *to_free = nullptr;
+    RetireBatch *to_free_tail = nullptr;
+    uint32_t freed_batches = 0;
+    uint32_t freed_nodes = 0;
+    uint32_t freed_bytes = 0;
+
+    while (freed_batches < MAINTENANCE_MAX_BATCHES &&
+           freed_nodes < MAINTENANCE_MAX_NODES &&
+           freed_bytes < MAINTENANCE_MAX_BYTES) {
+        RetireBatch *batch = nullptr;
+
+        retire_queue_lock(store);
+        RetireBatch *head = store->retire_queue_head;
+        if (head && head->retire_epoch < min_epoch) {
+            batch = head;
+            store->retire_queue_head = head->next;
+            if (!store->retire_queue_head) store->retire_queue_tail = nullptr;
+        }
+        retire_queue_unlock(store);
+
+        if (!batch) break;
+        batch->next = nullptr;
+        if (to_free_tail) {
+            to_free_tail->next = batch;
+        } else {
+            to_free = batch;
+        }
+        to_free_tail = batch;
+
+        store->pending_retire_batches.fetch_sub(1, std::memory_order_relaxed);
+        store->pending_retired_bytes.fetch_sub(batch->byte_count, std::memory_order_relaxed);
+        freed_batches++;
+        freed_nodes += batch->node_count;
+        freed_bytes += batch->byte_count;
+    }
+
+    while (to_free) {
+        RetireBatch *next_batch = to_free->next;
+        Node *node = to_free->head;
+        while (node) {
+            Node *next = node->gc_next;
+            node_free(store, worker_id, node);
+            node = next;
+        }
+        retire_batch_free(to_free);
+        to_free = next_batch;
+    }
+
+    if (freed_batches != 0) {
+        store->stats.maintenance_batches_freed.fetch_add(freed_batches, std::memory_order_relaxed);
+        store->stats.maintenance_nodes_freed.fetch_add(freed_nodes, std::memory_order_relaxed);
+    }
+}
+
 static bool trim_to_capacity(KvStore *store, uint32_t worker_id,
                               WorkerState *ws, uint64_t now_ms) {
     ASSERT(store != nullptr, "trim_to_capacity requires store");
@@ -568,7 +791,12 @@ static bool trim_to_capacity(KvStore *store, uint32_t worker_id,
     // Flush local delta so global view is current for this worker.
     flush_live_delta(store, ws);
     uint64_t live = store->live_bytes.load(std::memory_order_acquire);
-    if (live <= store->capacity_bytes) return true;
+    if (live <= store->capacity_bytes) {
+        store->over_capacity.store(0, std::memory_order_release);
+        return true;
+    }
+
+    store->over_capacity.store(1, std::memory_order_release);
 
     uint32_t cursor = ws->shard_cursor;
 
@@ -593,7 +821,13 @@ static bool trim_to_capacity(KvStore *store, uint32_t worker_id,
     }
 
     ws->shard_cursor = cursor;
-    return live <= store->capacity_bytes;
+    bool ok = live <= store->capacity_bytes;
+    if (ok) {
+        store->over_capacity.store(0, std::memory_order_release);
+    } else {
+        store->over_capacity.store(1, std::memory_order_release);
+    }
+    return ok;
 }
 
 KvStore *kv_store_create(const KvStoreConfig *config) {
@@ -643,7 +877,14 @@ KvStore *kv_store_create(const KvStoreConfig *config) {
     store->worker_count = worker_count;
     store->workers = nullptr;
     store->global_epoch.store(1, std::memory_order_relaxed);
-    store->cached_min_epoch.store(1, std::memory_order_relaxed);
+    store->pending_retired_bytes.store(0, std::memory_order_relaxed);
+    store->pending_retire_batches.store(0, std::memory_order_relaxed);
+    store->over_capacity.store(0, std::memory_order_relaxed);
+    store->maintenance_token.store(0, std::memory_order_relaxed);
+    store->retire_queue_lock.clear(std::memory_order_relaxed);
+    store->retire_queue_head = nullptr;
+    store->retire_queue_tail = nullptr;
+    stats_zero(&store->stats);
 
     for (uint32_t i = 0; i < KV_CLASS_COUNT; i++) {
         store->pools[i].obj_size = KV_CLASS_SIZES[i];
@@ -659,7 +900,7 @@ KvStore *kv_store_create(const KvStoreConfig *config) {
     }
     for (uint32_t i = 0; i < worker_count; i++) {
         // Start at sequence 1 (global_epoch starts at 1 as well).
-        store->workers[i].quiescent_seq.store(1, std::memory_order_relaxed);
+        store->workers[i].quiescent_epoch.store(1, std::memory_order_relaxed);
         store->workers[i].registered.store(0, std::memory_order_relaxed);
         store->workers[i].reserved0 = 0;
         store->workers[i].reserved1 = 0;
@@ -668,7 +909,7 @@ KvStore *kv_store_create(const KvStoreConfig *config) {
         store->workers[i].shard_cursor = i & store->shard_mask;
         store->workers[i].quiescent_counter = 0;
         store->workers[i].local_live_delta = 0;
-        store->workers[i].retired_head = nullptr;
+        store->workers[i].open_batch = nullptr;
         for (uint32_t c = 0; c < KV_CLASS_COUNT; c++) {
             store->workers[i].local_caches[c].head = nullptr;
             store->workers[i].local_caches[c].count = 0;
@@ -768,16 +1009,33 @@ void kv_store_destroy(KvStore *store) {
         shard->slots = nullptr;
     }
 
-    // Flush retired lists that may still hold deferred nodes.
+    // Flush worker open batches that may still hold deferred nodes.
     for (uint32_t i = 0; i < store->worker_count; i++) {
-        Node *n = store->workers[i].retired_head;
+        RetireBatch *batch = store->workers[i].open_batch;
+        if (batch) {
+            Node *n = batch->head;
+            while (n) {
+                Node *next = n->gc_next;
+                node_free(store, DESTROY_WORKER, n);
+                n = next;
+            }
+            retire_batch_free(batch);
+        }
+        store->workers[i].open_batch = nullptr;
+    }
+
+    while (store->retire_queue_head) {
+        RetireBatch *batch = store->retire_queue_head;
+        store->retire_queue_head = batch->next;
+        Node *n = batch->head;
         while (n) {
             Node *next = n->gc_next;
             node_free(store, DESTROY_WORKER, n);
             n = next;
         }
-        store->workers[i].retired_head = nullptr;
+        retire_batch_free(batch);
     }
+    store->retire_queue_tail = nullptr;
 
     for (uint32_t i = 0; i < KV_CLASS_COUNT; i++) {
         // Free all backing blocks owned by each pool class.
@@ -803,8 +1061,8 @@ int kv_store_register_worker(KvStore *store, uint32_t worker_id) {
     if (!ws) return -EINVAL;
     // Publish registration and current observed sequence frontier.
     ws->registered.store(1, std::memory_order_release);
-    ws->quiescent_seq.store(store->global_epoch.load(std::memory_order_acquire),
-                            std::memory_order_release);
+    ws->quiescent_epoch.store(store->global_epoch.load(std::memory_order_acquire),
+                              std::memory_order_release);
     return 0;
 }
 
@@ -812,45 +1070,35 @@ void kv_store_quiescent(KvStore *store, uint32_t worker_id) {
     if (!store) return;
     WorkerState *ws = worker_state_registered(store, worker_id);
     if (!ws) return;
+    store->stats.quiescent_calls.fetch_add(1, std::memory_order_relaxed);
 
     // Flush accumulated live_bytes delta to global.
     flush_live_delta(store, ws);
-
-    // Advance global epoch; this is the only write site.
-    uint64_t cur = store->global_epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
-    ws->quiescent_seq.store(cur, std::memory_order_release);
-
-    // Full worker scan every 16th call; use cached value otherwise.
-    // Stale min_epoch is safe: only delays reclamation, never causes premature free.
     ws->quiescent_counter++;
-    uint64_t min_seq;
-    if ((ws->quiescent_counter & 0xF) == 0) {
-        min_seq = cur;
-        for (uint32_t i = 0; i < store->worker_count; i++) {
-            if (!store->workers[i].registered.load(std::memory_order_acquire)) continue;
-            uint64_t q = store->workers[i].quiescent_seq.load(std::memory_order_acquire);
-            if (q < min_seq) min_seq = q;
-        }
-        store->cached_min_epoch.store(min_seq, std::memory_order_release);
-    } else {
-        min_seq = store->cached_min_epoch.load(std::memory_order_acquire);
+
+    uint64_t cur = store->global_epoch.load(std::memory_order_acquire);
+    ws->quiescent_epoch.store(cur, std::memory_order_release);
+    if (ws->open_batch && ws->open_batch->head &&
+        ((ws->quiescent_counter & 0x3Fu) == 0u || retire_batch_is_full(ws->open_batch))) {
+        retire_batch_flush_open(store, ws);
     }
 
-    Node *kept = nullptr;
-    Node *node = ws->retired_head;
-    while (node) {
-        Node *next = node->gc_next;
-        if (node->retire_seq < min_seq) {
-            // Safe to reclaim: every registered worker has passed this epoch.
-            node_free(store, worker_id, node);
-        } else {
-            // Keep for a future quiescent pass.
-            node->gc_next = kept;
-            kept = node;
-        }
-        node = next;
+    bool should_run = maintenance_should_run(store, ws);
+    if (!should_run) {
+        store->stats.quiescent_fast_returns.fetch_add(1, std::memory_order_relaxed);
+        return;
     }
-    ws->retired_head = kept;
+
+    uint8_t expected = 0;
+    if (!store->maintenance_token.compare_exchange_strong(expected, 1,
+                                                          std::memory_order_acq_rel,
+                                                          std::memory_order_acquire)) {
+        store->stats.quiescent_fast_returns.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    maintenance_run(store, worker_id);
+    store->maintenance_token.store(0, std::memory_order_release);
 }
 
 KvGetStatus kv_store_get(KvStore *store, uint32_t worker_id, std::string_view key,
@@ -922,18 +1170,11 @@ KvSetStatus kv_store_set(KvStore *store, uint32_t worker_id, std::string_view ke
            "shard_mask must equal shard_count-1");
     WorkerState *ws = worker_state_registered(store, worker_id);
     if (!ws) return KvSetStatus::INVALID;
+    store->stats.set_calls.fetch_add(1, std::memory_order_relaxed);
 
     uint64_t hash = hash_bytes(key);
     uint64_t expire_at = compute_expire_at(now_ms, opts);
-    // Allocate upfront so successful CAS can publish immediately.
-    Node *fresh = node_alloc(store, worker_id, hash, key, value, expire_at);
-    if (!fresh) return KvSetStatus::OOM;
-
-    // Fast reject values that can never fit the configured capacity.
-    if (fresh->alloc_size > store->capacity_bytes) {
-        node_free(store, worker_id, fresh);
-        return KvSetStatus::OOM;
-    }
+    Node *fresh = nullptr;
 
     uint32_t shard_idx = select_shard(hash, store->shard_mask);
     Shard *shard = &store->shards[shard_idx];
@@ -996,35 +1237,61 @@ KvSetStatus kv_store_set(KvStore *store, uint32_t worker_id, std::string_view ke
         }
 
         if (found_slot && found_node) {
+            if (!fresh) {
+                fresh = node_alloc(store, worker_id, hash, key, value, expire_at);
+                if (!fresh) return KvSetStatus::OOM;
+                store->stats.set_allocations.fetch_add(1, std::memory_order_relaxed);
+                if (fresh->alloc_size > store->capacity_bytes) {
+                    node_free(store, worker_id, fresh);
+                    return KvSetStatus::OOM;
+                }
+            }
             Node *expected = found_node;
             // Replace existing key atomically; loser retries with fresh scan.
             if (found_slot->compare_exchange_strong(expected, fresh,
                                                     std::memory_order_acq_rel,
                                                     std::memory_order_acquire)) {
-                ws->local_live_delta += static_cast<int64_t>(fresh->alloc_size)
-                                      - static_cast<int64_t>(found_node->alloc_size);
+                int64_t delta = static_cast<int64_t>(fresh->alloc_size)
+                              - static_cast<int64_t>(found_node->alloc_size);
+                ws->local_live_delta += delta;
                 retire_node(store, worker_id, found_node);
-                // Trim is best-effort; success path remains OK either way.
-                if (!trim_to_capacity(store, worker_id, ws, now_ms)) {
-                    return KvSetStatus::OK;
+                fresh = nullptr;
+                if (delta == 0) {
+                    store->stats.set_overwrite_same_size.fetch_add(1, std::memory_order_relaxed);
+                } else {
+                    store->stats.set_overwrite_size_change.fetch_add(1, std::memory_order_relaxed);
                 }
+                bool need_trim = delta > 0 ||
+                                 store->over_capacity.load(std::memory_order_acquire) != 0;
+                if (need_trim) (void)trim_to_capacity(store, worker_id, ws, now_ms);
                 return KvSetStatus::OK;
             }
+            store->stats.set_cas_failures.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
 
         if (empty_slot) {
+            if (!fresh) {
+                fresh = node_alloc(store, worker_id, hash, key, value, expire_at);
+                if (!fresh) return KvSetStatus::OOM;
+                store->stats.set_allocations.fetch_add(1, std::memory_order_relaxed);
+                if (fresh->alloc_size > store->capacity_bytes) {
+                    node_free(store, worker_id, fresh);
+                    return KvSetStatus::OOM;
+                }
+            }
             Node *expected = nullptr;
             // Insert into empty slot.
             if (empty_slot->compare_exchange_strong(expected, fresh,
                                                     std::memory_order_acq_rel,
                                                     std::memory_order_acquire)) {
                 ws->local_live_delta += static_cast<int64_t>(fresh->alloc_size);
-                if (!trim_to_capacity(store, worker_id, ws, now_ms)) {
-                    return KvSetStatus::OK;
-                }
+                fresh = nullptr;
+                store->stats.set_inserts.fetch_add(1, std::memory_order_relaxed);
+                (void)trim_to_capacity(store, worker_id, ws, now_ms);
                 return KvSetStatus::OK;
             }
+            store->stats.set_cas_failures.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
 
@@ -1054,26 +1321,39 @@ KvSetStatus kv_store_set(KvStore *store, uint32_t worker_id, std::string_view ke
         }
 
         if (victim_slot && victim_node) {
+            if (!fresh) {
+                fresh = node_alloc(store, worker_id, hash, key, value, expire_at);
+                if (!fresh) return KvSetStatus::OOM;
+                store->stats.set_allocations.fetch_add(1, std::memory_order_relaxed);
+                if (fresh->alloc_size > store->capacity_bytes) {
+                    node_free(store, worker_id, fresh);
+                    return KvSetStatus::OOM;
+                }
+            }
             Node *expected = victim_node;
             // Replace selected victim atomically.
             if (victim_slot->compare_exchange_strong(expected, fresh,
                                                      std::memory_order_acq_rel,
                                                      std::memory_order_acquire)) {
-                ws->local_live_delta += static_cast<int64_t>(fresh->alloc_size)
-                                      - static_cast<int64_t>(victim_node->alloc_size);
+                int64_t delta = static_cast<int64_t>(fresh->alloc_size)
+                              - static_cast<int64_t>(victim_node->alloc_size);
+                ws->local_live_delta += delta;
                 retire_node(store, worker_id, victim_node);
-                if (!trim_to_capacity(store, worker_id, ws, now_ms)) {
-                    return KvSetStatus::OK;
-                }
+                fresh = nullptr;
+                store->stats.set_evictions.fetch_add(1, std::memory_order_relaxed);
+                bool need_trim = delta > 0 ||
+                                 store->over_capacity.load(std::memory_order_acquire) != 0;
+                if (need_trim) (void)trim_to_capacity(store, worker_id, ws, now_ms);
                 return KvSetStatus::OK;
             }
+            store->stats.set_cas_failures.fetch_add(1, std::memory_order_relaxed);
             continue;
         }
     }
 
     // Could not place within retry budget.
     (void)trim_to_capacity(store, worker_id, ws, now_ms);
-    node_free(store, worker_id, fresh);
+    if (fresh) node_free(store, worker_id, fresh);
     return KvSetStatus::OOM;
 }
 
@@ -1097,13 +1377,33 @@ uint64_t kv_time_now_ms() {
 }
 
 bool kv_store_internal_stats_snapshot(const KvStore *store, KvStoreInternalStats *out) {
-    (void)store;
-    if (!out) return false;
-    std::memset(out, 0, sizeof(*out));
-    return false;
+    if (!store || !out) return false;
+    out->set_calls = store->stats.set_calls.load(std::memory_order_acquire);
+    out->set_overwrite_same_size =
+        store->stats.set_overwrite_same_size.load(std::memory_order_acquire);
+    out->set_overwrite_size_change =
+        store->stats.set_overwrite_size_change.load(std::memory_order_acquire);
+    out->set_inserts = store->stats.set_inserts.load(std::memory_order_acquire);
+    out->set_evictions = store->stats.set_evictions.load(std::memory_order_acquire);
+    out->set_cas_failures = store->stats.set_cas_failures.load(std::memory_order_acquire);
+    out->set_allocations = store->stats.set_allocations.load(std::memory_order_acquire);
+    out->quiescent_calls = store->stats.quiescent_calls.load(std::memory_order_acquire);
+    out->quiescent_fast_returns =
+        store->stats.quiescent_fast_returns.load(std::memory_order_acquire);
+    out->retire_batches_enqueued =
+        store->stats.retire_batches_enqueued.load(std::memory_order_acquire);
+    out->retired_nodes_enqueued =
+        store->stats.retired_nodes_enqueued.load(std::memory_order_acquire);
+    out->maintenance_runs = store->stats.maintenance_runs.load(std::memory_order_acquire);
+    out->maintenance_nodes_freed =
+        store->stats.maintenance_nodes_freed.load(std::memory_order_acquire);
+    out->maintenance_batches_freed =
+        store->stats.maintenance_batches_freed.load(std::memory_order_acquire);
+    return true;
 }
 
 bool kv_store_internal_stats_reset(KvStore *store) {
-    (void)store;
-    return false;
+    if (!store) return false;
+    stats_zero(&store->stats);
+    return true;
 }

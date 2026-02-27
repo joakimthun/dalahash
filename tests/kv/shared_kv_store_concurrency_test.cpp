@@ -1,4 +1,5 @@
 #include "kv/shared_kv_store.h"
+#include "kv/shared_kv_store_internal_stats.h"
 #include "shared_kv_store_test_utils.h"
 
 #include <atomic>
@@ -393,3 +394,38 @@ TEST(SharedKvConcurrency, ConcurrentRegisterAndQuiescentRemainStable) {
 
     kv_store_destroy(s);
 }
+
+#if defined(DALAHASH_KV_IMPL_V2)
+TEST(SharedKvV2, QuiescentFastPathPublishesStats) {
+    KvStoreConfig cfg = {
+        .capacity_bytes = 4ull << 20,
+        .shard_count = 16,
+        .buckets_per_shard = 256,
+        .worker_count = 4,
+    };
+    KvStore *s = kv_store_create(&cfg);
+    ASSERT_NE(s, nullptr);
+    for (uint32_t i = 0; i < cfg.worker_count; i++) ASSERT_EQ(kv_store_register_worker(s, i), 0);
+
+    for (uint32_t i = 0; i < 2000; i++) {
+        std::string key = "k:" + std::to_string(i & 127u);
+        std::string value = kvtest::make_value(i & 3u, i + 1u, 0x55u + i);
+        ASSERT_EQ(kv_store_set(s, i & 3u, key, value, 1000u + i, nullptr), KvSetStatus::OK);
+        if ((i & 31u) == 0u) kv_store_quiescent(s, i & 3u);
+    }
+
+    for (uint32_t i = 0; i < 512; i++) {
+        kv_store_quiescent(s, i & 3u);
+    }
+
+    KvStoreInternalStats stats = {};
+    ASSERT_TRUE(kv_store_internal_stats_snapshot(s, &stats));
+    EXPECT_GT(stats.quiescent_calls, 0u);
+    EXPECT_GT(stats.quiescent_fast_returns, 0u);
+    EXPECT_GT(stats.retire_batches_enqueued, 0u);
+    EXPECT_GT(stats.retired_nodes_enqueued, 0u);
+    EXPECT_GT(stats.maintenance_runs, 0u);
+
+    kv_store_destroy(s);
+}
+#endif
