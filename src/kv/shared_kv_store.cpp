@@ -80,6 +80,15 @@ struct alignas(64) ClassPool {
     std::atomic<PoolBlock *> blocks;
 };
 
+// Per-worker local allocation cache for one size class.
+static constexpr uint32_t LOCAL_CACHE_MAX = 32;
+static constexpr uint32_t LOCAL_CACHE_BATCH = 16;
+
+struct LocalClassCache {
+    FreeChunk *head;
+    uint32_t count;
+};
+
 // Per-worker cooperative reclamation state.
 //
 // Each worker owns its retired list to avoid shared-list contention.
@@ -91,7 +100,12 @@ struct alignas(64) WorkerState {
     uint8_t reserved2;
     uint32_t touch_counter;
     uint32_t shard_cursor;
+    uint32_t quiescent_counter;
+    // Accumulated live_bytes delta since last flush to global.
+    // Positive means net growth, negative means net shrinkage.
+    int64_t local_live_delta;
     Node *retired_head;
+    LocalClassCache local_caches[KV_CLASS_COUNT];
 };
 
 // Shard-local hash table metadata and slots.
@@ -112,7 +126,9 @@ struct KvStore {
     Shard *shards;
     uint32_t worker_count;
     WorkerState *workers;
-    std::atomic<uint64_t> global_seq;
+    std::atomic<uint64_t> global_epoch;
+    // Cached min epoch to avoid scanning all workers every quiescent call.
+    std::atomic<uint64_t> cached_min_epoch;
     ClassPool pools[KV_CLASS_COUNT];
 };
 
@@ -132,12 +148,34 @@ static uint32_t next_pow2_u32(uint32_t v) {
 }
 
 static uint64_t hash_bytes(std::string_view v) {
-    // FNV-1a with final avalanche to improve bucket distribution.
-    uint64_t h = 1469598103934665603ull;
-    for (uint8_t c : v) {
-        h ^= c;
-        h *= 1099511628211ull;
+    // Bulk multiply-xorshift hash: processes 8 bytes per iteration.
+    const uint8_t *p = reinterpret_cast<const uint8_t *>(v.data());
+    size_t len = v.size();
+    uint64_t h = 0x9e3779b97f4a7c15ull ^ (static_cast<uint64_t>(len) * 0xff51afd7ed558ccdull);
+
+    // 8-byte chunks
+    while (len >= 8) {
+        uint64_t k;
+        std::memcpy(&k, p, 8);
+        k *= 0xbf58476d1ce4e5b9ull;
+        k ^= k >> 31;
+        h ^= k;
+        h *= 0x94d049bb133111ebull;
+        p += 8;
+        len -= 8;
     }
+
+    // Tail bytes
+    if (len > 0) {
+        uint64_t k = 0;
+        std::memcpy(&k, p, len);
+        k *= 0xbf58476d1ce4e5b9ull;
+        k ^= k >> 31;
+        h ^= k;
+        h *= 0x94d049bb133111ebull;
+    }
+
+    // Final avalanche
     h ^= h >> 33;
     h *= 0xff51afd7ed558ccdull;
     h ^= h >> 33;
@@ -276,7 +314,53 @@ static bool pool_grow(ClassPool *pool) {
     return true;
 }
 
-static Node *node_alloc(KvStore *store, uint64_t hash,
+// Batch-refill local cache from global Treiber stack.
+static bool local_cache_refill(ClassPool *pool, LocalClassCache *cache) {
+    for (uint32_t filled = 0; filled < LOCAL_CACHE_BATCH;) {
+        FreeChunk *head = pool->free_head.load(std::memory_order_acquire);
+        if (!head) {
+            if (!pool_grow(pool)) return filled > 0;
+            continue;
+        }
+        // Try to pop one from global.
+        FreeChunk *next = head->next;
+        if (pool->free_head.compare_exchange_weak(head, next,
+                                                  std::memory_order_acq_rel,
+                                                  std::memory_order_acquire)) {
+            head->next = cache->head;
+            cache->head = head;
+            cache->count++;
+            filled++;
+        }
+    }
+    return true;
+}
+
+// Batch-drain local cache back to global Treiber stack.
+static void local_cache_drain(ClassPool *pool, LocalClassCache *cache) {
+    uint32_t to_drain = LOCAL_CACHE_BATCH;
+    if (to_drain > cache->count) to_drain = cache->count;
+
+    FreeChunk *drain_head = cache->head;
+    FreeChunk *drain_tail = drain_head;
+    for (uint32_t i = 1; i < to_drain; i++) {
+        drain_tail = drain_tail->next;
+    }
+
+    // Detach drained portion from local list.
+    cache->head = drain_tail->next;
+    cache->count -= to_drain;
+
+    // Push drained chain onto global free list.
+    FreeChunk *global_head = pool->free_head.load(std::memory_order_relaxed);
+    do {
+        drain_tail->next = global_head;
+    } while (!pool->free_head.compare_exchange_weak(global_head, drain_head,
+                                                     std::memory_order_release,
+                                                     std::memory_order_relaxed));
+}
+
+static Node *node_alloc(KvStore *store, uint32_t worker_id, uint64_t hash,
                         std::string_view key, std::string_view value,
                         uint64_t expire_at_ms) {
     if (!store) return nullptr;
@@ -295,22 +379,35 @@ static Node *node_alloc(KvStore *store, uint64_t hash,
 
     if (class_idx >= 0) {
         ASSERT(class_idx < static_cast<int>(KV_CLASS_COUNT), "class index out of range");
-        // Fast path: pop one object from class free list.
         ClassPool *pool = &store->pools[class_idx];
         alloc_size = pool->obj_size;
-        for (;;) {
-            FreeChunk *head = pool->free_head.load(std::memory_order_acquire);
-            if (!head) {
-                // Slow path: grow class and retry pop.
-                if (!pool_grow(pool)) return nullptr;
-                continue;
+
+        // Fast path: pop from per-worker local cache.
+        WorkerState *ws = worker_state_in_range(store, worker_id);
+        if (ws && ws->registered.load(std::memory_order_relaxed)) {
+            LocalClassCache *cache = &ws->local_caches[class_idx];
+            if (!cache->head) {
+                if (!local_cache_refill(pool, cache)) return nullptr;
             }
-            FreeChunk *next = head->next;
-            if (pool->free_head.compare_exchange_weak(head, next,
-                                                      std::memory_order_acq_rel,
-                                                      std::memory_order_acquire)) {
-                mem = head;
-                break;
+            FreeChunk *chunk = cache->head;
+            cache->head = chunk->next;
+            cache->count--;
+            mem = chunk;
+        } else {
+            // Fallback: pop directly from global (e.g. during destroy).
+            for (;;) {
+                FreeChunk *head = pool->free_head.load(std::memory_order_acquire);
+                if (!head) {
+                    if (!pool_grow(pool)) return nullptr;
+                    continue;
+                }
+                FreeChunk *next = head->next;
+                if (pool->free_head.compare_exchange_weak(head, next,
+                                                          std::memory_order_acq_rel,
+                                                          std::memory_order_acquire)) {
+                    mem = head;
+                    break;
+                }
             }
         }
         stored_class = static_cast<uint8_t>(class_idx);
@@ -348,10 +445,9 @@ static Node *node_alloc(KvStore *store, uint64_t hash,
     return node;
 }
 
-static void node_free(KvStore *store, Node *node) {
+static void node_free(KvStore *store, uint32_t worker_id, Node *node) {
     if (!store || !node) return;
     if (node->class_idx == KV_CLASS_LARGE) {
-        // Large path is direct free.
         std::free(node);
         return;
     }
@@ -363,8 +459,23 @@ static void node_free(KvStore *store, Node *node) {
         return;
     }
     ClassPool *pool = &store->pools[class_idx];
+
+    // Fast path: push to per-worker local cache.
+    WorkerState *ws = worker_state_in_range(store, worker_id);
+    if (ws && ws->registered.load(std::memory_order_relaxed)) {
+        LocalClassCache *cache = &ws->local_caches[class_idx];
+        auto *chunk = reinterpret_cast<FreeChunk *>(node);
+        chunk->next = cache->head;
+        cache->head = chunk;
+        cache->count++;
+        if (cache->count > LOCAL_CACHE_MAX) {
+            local_cache_drain(pool, cache);
+        }
+        return;
+    }
+
+    // Fallback: push directly to global (e.g. during destroy).
     auto *chunk = reinterpret_cast<FreeChunk *>(node);
-    // Push object back to class free list.
     FreeChunk *head = pool->free_head.load(std::memory_order_relaxed);
     do {
         chunk->next = head;
@@ -378,17 +489,17 @@ static void retire_node(KvStore *store, uint32_t worker_id, Node *node) {
     WorkerState *ws = worker_state_registered(store, worker_id);
     ASSERT(ws != nullptr, "retire_node requires registered worker");
     if (!ws) return;
-    // Monotonic sequence gives a global ordering for deferred reclamation.
-    uint64_t seq = store->global_seq.fetch_add(1, std::memory_order_acq_rel) + 1;
-    node->retire_seq = seq;
+    // Stamp with current epoch (read-only); epoch is bumped in kv_store_quiescent.
+    node->retire_seq = store->global_epoch.load(std::memory_order_acquire);
     // Worker-local retired list avoids global lock contention.
     node->gc_next = ws->retired_head;
     ws->retired_head = node;
 }
 
 static bool evict_one_from_shard(KvStore *store, uint32_t worker_id,
-                                 Shard *shard, uint64_t now_ms) {
+                                 WorkerState *ws, Shard *shard, uint64_t now_ms) {
     ASSERT(store != nullptr, "evict_one_from_shard requires store");
+    ASSERT(ws != nullptr, "evict_one_from_shard requires worker state");
     ASSERT(shard != nullptr, "evict_one_from_shard requires shard");
     ASSERT(shard->slots != nullptr, "shard slots must be initialized");
     ASSERT(shard->bucket_count > 0, "bucket_count must be non-zero");
@@ -396,8 +507,6 @@ static bool evict_one_from_shard(KvStore *store, uint32_t worker_id,
            "bucket_count must be power of two");
     ASSERT(shard->bucket_mask == shard->bucket_count - 1u,
            "bucket_mask must equal bucket_count-1");
-    ASSERT(worker_state_registered(store, worker_id) != nullptr,
-           "eviction requires registered worker");
     // Start near previous position to spread eviction cost over table.
     uint32_t start = shard->clock_hand.fetch_add(1, std::memory_order_relaxed);
     uint32_t max_scan = shard->bucket_count;
@@ -426,7 +535,7 @@ static bool evict_one_from_shard(KvStore *store, uint32_t worker_id,
                 continue;
             }
 
-            store->live_bytes.fetch_sub(node->alloc_size, std::memory_order_relaxed);
+            ws->local_live_delta -= static_cast<int64_t>(node->alloc_size);
             retire_node(store, worker_id, node);
             return true;
         }
@@ -434,18 +543,32 @@ static bool evict_one_from_shard(KvStore *store, uint32_t worker_id,
     return false;
 }
 
-static bool trim_to_capacity(KvStore *store, uint32_t worker_id, uint64_t now_ms) {
+// Flush per-worker live_bytes delta to the global atomic.
+static void flush_live_delta(KvStore *store, WorkerState *ws) {
+    int64_t delta = ws->local_live_delta;
+    if (delta == 0) return;
+    if (delta > 0) {
+        store->live_bytes.fetch_add(static_cast<uint64_t>(delta), std::memory_order_relaxed);
+    } else {
+        store->live_bytes.fetch_sub(static_cast<uint64_t>(-delta), std::memory_order_relaxed);
+    }
+    ws->local_live_delta = 0;
+}
+
+static bool trim_to_capacity(KvStore *store, uint32_t worker_id,
+                              WorkerState *ws, uint64_t now_ms) {
     ASSERT(store != nullptr, "trim_to_capacity requires store");
+    ASSERT(ws != nullptr, "trim_to_capacity requires worker state");
     ASSERT(store->shard_count > 0, "shard_count must be non-zero");
     ASSERT((store->shard_count & (store->shard_count - 1u)) == 0,
            "shard_count must be power of two");
     ASSERT(store->shard_mask == store->shard_count - 1u,
            "shard_mask must equal shard_count-1");
+    // Flush local delta so global view is current for this worker.
+    flush_live_delta(store, ws);
     uint64_t live = store->live_bytes.load(std::memory_order_acquire);
     if (live <= store->capacity_bytes) return true;
 
-    WorkerState *ws = worker_state_registered(store, worker_id);
-    if (!ws) return false;
     uint32_t cursor = ws->shard_cursor;
 
     // Best-effort convergence loop; bounded to avoid pathological long stalls.
@@ -454,13 +577,15 @@ static bool trim_to_capacity(KvStore *store, uint32_t worker_id, uint64_t now_ms
         bool evicted = false;
         for (uint32_t off = 0; off < store->shard_count; off++) {
             uint32_t shard_idx = (cursor + off) & store->shard_mask;
-            if (evict_one_from_shard(store, worker_id, &store->shards[shard_idx], now_ms)) {
+            if (evict_one_from_shard(store, worker_id, ws, &store->shards[shard_idx], now_ms)) {
                 evicted = true;
                 cursor = (shard_idx + 1) & store->shard_mask;
                 break;
             }
         }
         if (!evicted) return false;
+        // Eviction delta accumulated locally; flush for accurate check.
+        flush_live_delta(store, ws);
         live = store->live_bytes.load(std::memory_order_acquire);
         rounds++;
         if (rounds > store->shard_count * 8u) break;
@@ -516,7 +641,8 @@ KvStore *kv_store_create(const KvStoreConfig *config) {
     store->shards = nullptr;
     store->worker_count = worker_count;
     store->workers = nullptr;
-    store->global_seq.store(1, std::memory_order_relaxed);
+    store->global_epoch.store(1, std::memory_order_relaxed);
+    store->cached_min_epoch.store(1, std::memory_order_relaxed);
 
     for (uint32_t i = 0; i < KV_CLASS_COUNT; i++) {
         store->pools[i].obj_size = KV_CLASS_SIZES[i];
@@ -531,7 +657,7 @@ KvStore *kv_store_create(const KvStoreConfig *config) {
         return nullptr;
     }
     for (uint32_t i = 0; i < worker_count; i++) {
-        // Start at sequence 1 (global_seq starts at 1 as well).
+        // Start at sequence 1 (global_epoch starts at 1 as well).
         store->workers[i].quiescent_seq.store(1, std::memory_order_relaxed);
         store->workers[i].registered.store(0, std::memory_order_relaxed);
         store->workers[i].reserved0 = 0;
@@ -539,7 +665,13 @@ KvStore *kv_store_create(const KvStoreConfig *config) {
         store->workers[i].reserved2 = 0;
         store->workers[i].touch_counter = 0;
         store->workers[i].shard_cursor = i & store->shard_mask;
+        store->workers[i].quiescent_counter = 0;
+        store->workers[i].local_live_delta = 0;
         store->workers[i].retired_head = nullptr;
+        for (uint32_t c = 0; c < KV_CLASS_COUNT; c++) {
+            store->workers[i].local_caches[c].head = nullptr;
+            store->workers[i].local_caches[c].count = 0;
+        }
     }
 
     store->shards = new (std::nothrow) Shard[shard_count];
@@ -595,12 +727,41 @@ void kv_store_destroy(KvStore *store) {
     ASSERT(store->shards != nullptr, "store shards must be initialized");
 
     // Destroy requires external synchronization; no concurrent readers/writers.
+
+    // Flush any remaining live_bytes deltas.
+    for (uint32_t w = 0; w < store->worker_count; w++) {
+        flush_live_delta(store, &store->workers[w]);
+    }
+
+    // Drain all per-worker local caches back to global pools first.
+    for (uint32_t w = 0; w < store->worker_count; w++) {
+        for (uint32_t c = 0; c < KV_CLASS_COUNT; c++) {
+            LocalClassCache *cache = &store->workers[w].local_caches[c];
+            while (cache->head) {
+                FreeChunk *chunk = cache->head;
+                cache->head = chunk->next;
+                cache->count--;
+                // Push directly to global free list.
+                ClassPool *pool = &store->pools[c];
+                FreeChunk *head = pool->free_head.load(std::memory_order_relaxed);
+                do {
+                    chunk->next = head;
+                } while (!pool->free_head.compare_exchange_weak(head, chunk,
+                                                                 std::memory_order_release,
+                                                                 std::memory_order_relaxed));
+            }
+        }
+    }
+
+    // Use UINT32_MAX as worker_id to hit global fallback path in node_free.
+    static constexpr uint32_t DESTROY_WORKER = UINT32_MAX;
+
     for (uint32_t s = 0; s < store->shard_count; s++) {
         Shard *shard = &store->shards[s];
         size_t slot_count = static_cast<size_t>(shard->bucket_count) * KV_BUCKET_SLOTS;
         for (size_t i = 0; i < slot_count; i++) {
             Node *node = shard->slots[i].load(std::memory_order_relaxed);
-            if (node) node_free(store, node);
+            if (node) node_free(store, DESTROY_WORKER, node);
         }
         std::free(shard->slots);
         shard->slots = nullptr;
@@ -611,7 +772,7 @@ void kv_store_destroy(KvStore *store) {
         Node *n = store->workers[i].retired_head;
         while (n) {
             Node *next = n->gc_next;
-            node_free(store, n);
+            node_free(store, DESTROY_WORKER, n);
             n = next;
         }
         store->workers[i].retired_head = nullptr;
@@ -641,7 +802,7 @@ int kv_store_register_worker(KvStore *store, uint32_t worker_id) {
     if (!ws) return -EINVAL;
     // Publish registration and current observed sequence frontier.
     ws->registered.store(1, std::memory_order_release);
-    ws->quiescent_seq.store(store->global_seq.load(std::memory_order_acquire),
+    ws->quiescent_seq.store(store->global_epoch.load(std::memory_order_acquire),
                             std::memory_order_release);
     return 0;
 }
@@ -651,25 +812,36 @@ void kv_store_quiescent(KvStore *store, uint32_t worker_id) {
     WorkerState *ws = worker_state_registered(store, worker_id);
     if (!ws) return;
 
-    // Publish quiescent checkpoint for this worker.
-    uint64_t cur = store->global_seq.load(std::memory_order_acquire);
+    // Flush accumulated live_bytes delta to global.
+    flush_live_delta(store, ws);
+
+    // Advance global epoch; this is the only write site.
+    uint64_t cur = store->global_epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
     ws->quiescent_seq.store(cur, std::memory_order_release);
 
-    // Reclamation can only free nodes retired at or before the slowest worker.
-    uint64_t min_seq = cur;
-    for (uint32_t i = 0; i < store->worker_count; i++) {
-        if (!store->workers[i].registered.load(std::memory_order_acquire)) continue;
-        uint64_t q = store->workers[i].quiescent_seq.load(std::memory_order_acquire);
-        if (q < min_seq) min_seq = q;
+    // Full worker scan every 16th call; use cached value otherwise.
+    // Stale min_epoch is safe: only delays reclamation, never causes premature free.
+    ws->quiescent_counter++;
+    uint64_t min_seq;
+    if ((ws->quiescent_counter & 0xF) == 0) {
+        min_seq = cur;
+        for (uint32_t i = 0; i < store->worker_count; i++) {
+            if (!store->workers[i].registered.load(std::memory_order_acquire)) continue;
+            uint64_t q = store->workers[i].quiescent_seq.load(std::memory_order_acquire);
+            if (q < min_seq) min_seq = q;
+        }
+        store->cached_min_epoch.store(min_seq, std::memory_order_release);
+    } else {
+        min_seq = store->cached_min_epoch.load(std::memory_order_acquire);
     }
 
     Node *kept = nullptr;
     Node *node = ws->retired_head;
     while (node) {
         Node *next = node->gc_next;
-        if (node->retire_seq <= min_seq) {
-            // Safe to reclaim: every registered worker has crossed retire_seq.
-            node_free(store, node);
+        if (node->retire_seq < min_seq) {
+            // Safe to reclaim: every registered worker has passed this epoch.
+            node_free(store, worker_id, node);
         } else {
             // Keep for a future quiescent pass.
             node->gc_next = kept;
@@ -716,7 +888,7 @@ KvGetStatus kv_store_get(KvStore *store, uint32_t worker_id, std::string_view ke
                 if (slot->compare_exchange_strong(expected, nullptr,
                                                   std::memory_order_acq_rel,
                                                   std::memory_order_acquire)) {
-                    store->live_bytes.fetch_sub(node->alloc_size, std::memory_order_relaxed);
+                    ws->local_live_delta -= static_cast<int64_t>(node->alloc_size);
                     retire_node(store, worker_id, node);
                 }
                 return KvGetStatus::MISS;
@@ -747,17 +919,18 @@ KvSetStatus kv_store_set(KvStore *store, uint32_t worker_id, std::string_view ke
     ASSERT(store->shard_count > 0, "shard_count must be non-zero");
     ASSERT(store->shard_mask == store->shard_count - 1u,
            "shard_mask must equal shard_count-1");
-    if (!worker_state_registered(store, worker_id)) return KvSetStatus::INVALID;
+    WorkerState *ws = worker_state_registered(store, worker_id);
+    if (!ws) return KvSetStatus::INVALID;
 
     uint64_t hash = hash_bytes(key);
     uint64_t expire_at = compute_expire_at(now_ms, opts);
     // Allocate upfront so successful CAS can publish immediately.
-    Node *fresh = node_alloc(store, hash, key, value, expire_at);
+    Node *fresh = node_alloc(store, worker_id, hash, key, value, expire_at);
     if (!fresh) return KvSetStatus::OOM;
 
     // Fast reject values that can never fit the configured capacity.
     if (fresh->alloc_size > store->capacity_bytes) {
-        node_free(store, fresh);
+        node_free(store, worker_id, fresh);
         return KvSetStatus::OOM;
     }
 
@@ -827,15 +1000,11 @@ KvSetStatus kv_store_set(KvStore *store, uint32_t worker_id, std::string_view ke
             if (found_slot->compare_exchange_strong(expected, fresh,
                                                     std::memory_order_acq_rel,
                                                     std::memory_order_acquire)) {
-                if (fresh->alloc_size >= found_node->alloc_size)
-                    store->live_bytes.fetch_add(fresh->alloc_size - found_node->alloc_size,
-                                                std::memory_order_relaxed);
-                else
-                    store->live_bytes.fetch_sub(found_node->alloc_size - fresh->alloc_size,
-                                                std::memory_order_relaxed);
+                ws->local_live_delta += static_cast<int64_t>(fresh->alloc_size)
+                                      - static_cast<int64_t>(found_node->alloc_size);
                 retire_node(store, worker_id, found_node);
                 // Trim is best-effort; success path remains OK either way.
-                if (!trim_to_capacity(store, worker_id, now_ms)) {
+                if (!trim_to_capacity(store, worker_id, ws, now_ms)) {
                     return KvSetStatus::OK;
                 }
                 return KvSetStatus::OK;
@@ -849,8 +1018,8 @@ KvSetStatus kv_store_set(KvStore *store, uint32_t worker_id, std::string_view ke
             if (empty_slot->compare_exchange_strong(expected, fresh,
                                                     std::memory_order_acq_rel,
                                                     std::memory_order_acquire)) {
-                store->live_bytes.fetch_add(fresh->alloc_size, std::memory_order_relaxed);
-                if (!trim_to_capacity(store, worker_id, now_ms)) {
+                ws->local_live_delta += static_cast<int64_t>(fresh->alloc_size);
+                if (!trim_to_capacity(store, worker_id, ws, now_ms)) {
                     return KvSetStatus::OK;
                 }
                 return KvSetStatus::OK;
@@ -889,14 +1058,10 @@ KvSetStatus kv_store_set(KvStore *store, uint32_t worker_id, std::string_view ke
             if (victim_slot->compare_exchange_strong(expected, fresh,
                                                      std::memory_order_acq_rel,
                                                      std::memory_order_acquire)) {
-                if (fresh->alloc_size >= victim_node->alloc_size)
-                    store->live_bytes.fetch_add(fresh->alloc_size - victim_node->alloc_size,
-                                                std::memory_order_relaxed);
-                else
-                    store->live_bytes.fetch_sub(victim_node->alloc_size - fresh->alloc_size,
-                                                std::memory_order_relaxed);
+                ws->local_live_delta += static_cast<int64_t>(fresh->alloc_size)
+                                      - static_cast<int64_t>(victim_node->alloc_size);
                 retire_node(store, worker_id, victim_node);
-                if (!trim_to_capacity(store, worker_id, now_ms)) {
+                if (!trim_to_capacity(store, worker_id, ws, now_ms)) {
                     return KvSetStatus::OK;
                 }
                 return KvSetStatus::OK;
@@ -906,8 +1071,8 @@ KvSetStatus kv_store_set(KvStore *store, uint32_t worker_id, std::string_view ke
     }
 
     // Could not place within retry budget.
-    (void)trim_to_capacity(store, worker_id, now_ms);
-    node_free(store, fresh);
+    (void)trim_to_capacity(store, worker_id, ws, now_ms);
+    node_free(store, worker_id, fresh);
     return KvSetStatus::OOM;
 }
 
