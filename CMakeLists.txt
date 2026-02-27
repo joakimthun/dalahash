@@ -41,6 +41,7 @@ add_link_options(
 # all objects linked into each binary (including GoogleTest via FetchContent).
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(ENABLE_LSAN "Enable LeakSanitizer" OFF)
+option(ENABLE_BENCHMARKS "Build benchmark targets" OFF)
 
 set(DALAHASH_SANITIZERS "")
 if(ENABLE_ASAN)
@@ -97,3 +98,7 @@ target_link_options(dalahash PRIVATE -static-libstdc++ -static-libgcc)
 # Enable CTest (cmake's test runner) and pull in the tests/ subdirectory
 enable_testing()
 add_subdirectory(tests)
+
+if(ENABLE_BENCHMARKS)
+    add_subdirectory(bench)
+endif()

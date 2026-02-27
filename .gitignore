@@ -9,5 +9,6 @@ build-lsan/
 build_lsan/
 build-asan/
 build_asan/
+bench/results/
 *.local.json
 notes.txt
