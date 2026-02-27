@@ -87,6 +87,7 @@ static void add_mixed_pipeline_args(benchmark::internal::Benchmark *b) {
     b->Args({8, 16, 64});
     b->Args({8, 32, 256});
     b->Args({16, 32, 256});
+    b->Args({16, 128, 256});
     b->Args({16, 64, 1024});
 }
 

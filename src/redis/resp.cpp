@@ -14,67 +14,51 @@ struct ParseIntResult {
     int value;
 };
 
-//  Reads a signed decimal integer starting at buf[*pos], then advances *pos
-// past the mandatory \r\n terminator.
+static inline bool is_ascii_digit(uint8_t c) {
+    return c >= '0' && c <= '9';
+}
+
+// Reads a non-negative decimal integer starting at buf[*pos], then advances
+// *pos past the mandatory \r\n terminator.
 //
 // Used for RESP count/length prefixes:
 //   *3    — array of 3 elements
 //   $5    — bulk string of 5 bytes
-//   $-1   — null bulk string (negative, only valid length)
 //
+// Request parsing rejects negative bulk lengths, so this only accepts digits.
 // Returns ParseIntStatus::OK with parsed value on success, INCOMPLETE if the
 // full line has not arrived, or ERROR on malformed input.
 static ParseIntResult parse_int(const uint8_t *buf, uint32_t len, uint32_t *pos) {
     ASSERT(buf != nullptr || len == 0, "parse_int null buffer with non-zero length");
     ASSERT(pos != nullptr, "parse_int requires position pointer");
     ASSERT(*pos <= len, "parse_int position out of bounds");
+    uint32_t p = *pos;
     int n = 0;
-    bool negative = false;
     bool has_digits = false;
-    uint32_t start = *pos;
-
-    if (*pos < len && buf[*pos] == '-') { negative = true; (*pos)++; }
-
-    while (*pos < len && buf[*pos] != '\r') {
-        uint8_t c = buf[*pos];
-        if (c < '0' || c > '9') {
-            *pos = start;
-            return {ParseIntStatus::ERROR, 0};
-        }
-        int digit = c - '0';
+    while (p < len) {
+        const uint8_t c = buf[p];
+        if (c == '\r') break;
+        if (!is_ascii_digit(c)) return {ParseIntStatus::ERROR, 0};
+        const int digit = static_cast<int>(c - '0');
         // Overflow check: n * 10 + digit > INT_MAX
-        if (n > INT_MAX / 10 || (n == INT_MAX / 10 && digit > 7)) {
-            *pos = start;
+        if (n > INT_MAX / 10 || (n == INT_MAX / 10 && digit > 7))
             return {ParseIntStatus::ERROR, 0};
-        }
         n = n * 10 + digit;
         has_digits = true;
-        (*pos)++;
+        p++;
     }
 
-    if (*pos >= len) {
-        *pos = start;
-        return {ParseIntStatus::INCOMPLETE, 0};
-    }
+    if (p >= len) return {ParseIntStatus::INCOMPLETE, 0};
 
     // Need at least \r and \n still in the buffer.
-    if (*pos + 1 >= len) {
-        *pos = start;
-        return {ParseIntStatus::INCOMPLETE, 0};
-    }
+    if (p + 1 >= len) return {ParseIntStatus::INCOMPLETE, 0};
 
     // No digits between prefix and \r is malformed (e.g. "*\r\n").
-    if (!has_digits) {
-        *pos = start;
-        return {ParseIntStatus::ERROR, 0};
-    }
-    if (buf[*pos] != '\r' || buf[*pos + 1] != '\n') {
-        *pos = start;
-        return {ParseIntStatus::ERROR, 0};
-    }
+    if (!has_digits) return {ParseIntStatus::ERROR, 0};
+    if (buf[p + 1] != '\n') return {ParseIntStatus::ERROR, 0};
 
-    *pos += 2; // skip \r\n
-    return {ParseIntStatus::OK, negative ? -n : n};
+    *pos = p + 2; // skip \r\n
+    return {ParseIntStatus::OK, n};
 }
 
 //  Parse one complete RESP command from data[0..len).
