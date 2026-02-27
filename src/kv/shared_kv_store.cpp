@@ -724,8 +724,11 @@ KvGetStatus kv_store_get(KvStore *store, uint32_t worker_id, std::string_view ke
 
             ws->touch_counter++;
             // Sampled refbit write lowers write-amplification on hot reads.
-            if ((ws->touch_counter & KV_TOUCH_SAMPLE_MASK) == 0)
-                node->refbit.store(1, std::memory_order_relaxed);
+            if ((ws->touch_counter & KV_TOUCH_SAMPLE_MASK) == 0) {
+                // Avoid cross-core cacheline ping-pong when bit is already hot.
+                if (node->refbit.load(std::memory_order_relaxed) == 0)
+                    node->refbit.store(1, std::memory_order_relaxed);
+            }
 
             out->data = node_value_ptr(node);
             out->len = node->value_len;
