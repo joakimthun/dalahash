@@ -70,5 +70,6 @@ Current matrix:
 - `2000000, 24, 128`
 - `4000000, 24, 128`
 - `8000000, 24, 128`
+- `4000000, 128, 256`
 
 The random keys and values are deterministic and generated from fixed seeds.

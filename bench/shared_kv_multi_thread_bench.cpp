@@ -144,9 +144,14 @@ static void add_large_dataset_args(benchmark::internal::Benchmark *b) {
     b->Args({8000000, 24, 128});
 }
 
+static void add_larger_key_value_dataset_args(benchmark::internal::Benchmark *b) {
+    b->Args({4000000, 128, 256});
+}
+
 static void add_all_args(benchmark::internal::Benchmark *b) {
     add_baseline_args(b);
     add_large_dataset_args(b);
+    add_larger_key_value_dataset_args(b);
 }
 
 class SharedKvMultiFixture : public benchmark::Fixture {
