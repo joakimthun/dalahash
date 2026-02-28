@@ -458,3 +458,47 @@ TEST(RespParse, InvalidBulkPayloadTrailerIsError) {
                          &cmd, &consumed),
               RespParseResult::ERROR);
 }
+
+// --- T10: Leading zeros in length prefix ---
+
+TEST(RespParse, LeadingZerosInArrayCount) {
+    // "*02\r\n..." — leading zeros are accepted since parse_int accepts any
+    // sequence of digits. Verify defined behavior.
+    std::string input = "*02\r\n$3\r\nGET\r\n$3\r\nfoo\r\n";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    auto result = resp_parse(reinterpret_cast<const uint8_t*>(input.data()),
+                             static_cast<uint32_t>(input.size()), &cmd, &consumed);
+    EXPECT_EQ(result, RespParseResult::OK);
+    EXPECT_EQ(cmd.argc, 2);
+}
+
+TEST(RespParse, LeadingZerosInBulkLength) {
+    // "$0005\r\nhello\r\n" — 5 bytes with leading zeros.
+    std::string input = "*1\r\n$0005\r\nhello\r\n";
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    auto result = resp_parse(reinterpret_cast<const uint8_t*>(input.data()),
+                             static_cast<uint32_t>(input.size()), &cmd, &consumed);
+    EXPECT_EQ(result, RespParseResult::OK);
+    EXPECT_EQ(cmd.args[0].len, 5u);
+    EXPECT_EQ(std::memcmp(cmd.args[0].data, "hello", 5), 0);
+}
+
+// --- T4: Binary-safe keys/values with embedded nulls ---
+
+TEST(RespParse, BulkStringWithEmbeddedNulls) {
+    // Bulk string containing multiple \0 bytes.
+    uint8_t payload[] = {0x00, 0x00, 0x00, 'a', 0x00};
+    std::string input = "*1\r\n$5\r\n";
+    input.append(reinterpret_cast<char*>(payload), 5);
+    input += "\r\n";
+
+    RespCommand cmd;
+    uint32_t consumed = 0;
+    EXPECT_EQ(resp_parse(reinterpret_cast<const uint8_t*>(input.data()), static_cast<uint32_t>(input.size()),
+                         &cmd, &consumed),
+              RespParseResult::OK);
+    EXPECT_EQ(cmd.args[0].len, 5u);
+    EXPECT_EQ(std::memcmp(cmd.args[0].data, payload, 5), 0);
+}

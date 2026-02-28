@@ -38,8 +38,17 @@ static uint32_t write_error_bounded(uint8_t* out, uint32_t out_buf_size, const c
     int n = std::snprintf(reinterpret_cast<char*>(out), out_buf_size, "-ERR %s\r\n", msg);
     if (n <= 0)
         return 0;
-    if (static_cast<uint32_t>(n) >= out_buf_size)
-        return out_buf_size - 1;
+    if (static_cast<uint32_t>(n) >= out_buf_size) {
+        // Truncation: the full message didn't fit. Write a minimal valid RESP
+        // error instead of returning a malformed partial response.
+        static constexpr char fallback[] = "-ERR\r\n";
+        static constexpr uint32_t fallback_len = sizeof(fallback) - 1;
+        if (out_buf_size >= fallback_len) {
+            std::memcpy(out, fallback, fallback_len);
+            return fallback_len;
+        }
+        return 0;
+    }
     return static_cast<uint32_t>(n);
 }
 

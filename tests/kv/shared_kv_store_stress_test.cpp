@@ -117,7 +117,7 @@ TEST_P(SharedKvStress, SeededConcurrentMatrix) {
     EXPECT_EQ(invalid_status.load(std::memory_order_acquire), 0u)
         << "invalid status in stress case: " << c.name;
     EXPECT_EQ(bad_value.load(std::memory_order_acquire), 0u) << "bad value shape in stress case: " << c.name;
-    EXPECT_LE(kv_store_live_bytes(s), kv_store_capacity_bytes(s) * 5u)
+    EXPECT_LE(kv_store_live_bytes(s), kv_store_capacity_bytes(s) * 2u)
         << "unexpected live bytes growth in stress case: " << c.name;
     EXPECT_TRUE(kvtest::converge_to_capacity(s, 0, logical_now.load(std::memory_order_acquire), 3000))
         << "failed to converge capacity in stress case: " << c.name;

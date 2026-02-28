@@ -83,6 +83,10 @@ struct WorkerState {
     int pending_close_count;
     int pending_orphan_close_fds[MAX_PENDING_CLOSE];
     int pending_orphan_close_count;
+    // Secondary overflow list: captures fds that didn't fit into the primary
+    // pending_close arrays, avoiding O(MAX_CONNECTIONS) full-table scan.
+    int overflow_close_fds[MAX_PENDING_CLOSE];
+    int overflow_close_count;
     bool close_retry_overflow;
 };
 
@@ -495,6 +499,8 @@ static void submit_close_or_defer(int fd, Connection** conns, IoOps* ops, IoBack
         if (!conn->close_in_retry_queue) {
             if (enqueue_pending_fd(state->pending_close_fds, &state->pending_close_count, fd)) {
                 conn->close_in_retry_queue = true;
+            } else if (enqueue_pending_fd(state->overflow_close_fds, &state->overflow_close_count, fd)) {
+                conn->close_in_retry_queue = true;
             } else {
                 state->close_retry_overflow = true;
             }
@@ -518,8 +524,13 @@ static void submit_orphan_close_or_defer(int fd, IoOps* ops, IoBackend* backend,
         return;
 
     if (ret == -ENOSPC) {
-        if (!enqueue_pending_fd(state->pending_orphan_close_fds, &state->pending_orphan_close_count, fd))
-            state->close_retry_overflow = true;
+        if (!enqueue_pending_fd(state->pending_orphan_close_fds, &state->pending_orphan_close_count, fd) &&
+            !enqueue_pending_fd(state->overflow_close_fds, &state->overflow_close_count, fd)) {
+            // All orphan queues full (>512 concurrent orphan ENOSPC). The
+            // last-resort conns[] scan cannot recover orphan fds. This fd's
+            // kernel socket will leak until process exit.
+            std::fprintf(stderr, "worker: orphan fd %d lost — all close retry queues full\n", fd);
+        }
         return;
     }
 
@@ -748,7 +759,7 @@ static void handle_recv(const IoCompletion* comp, Connection** conns, ProtocolWo
     now_ms = protocol_now_ms();
 
     while (offset < parse_len) {
-        ProtocolCommand cmd;
+        ProtocolCommand cmd = {};
         uint32_t consumed = 0;
         ProtocolParseResult result = protocol_parse(parse_buf + offset, parse_len - offset, &cmd, &consumed);
 
@@ -1011,6 +1022,9 @@ int worker_run(WorkerConfig* config) {
                 } else if (close_ret == -ENOSPC) {
                     if (remaining < MAX_PENDING_CLOSE) {
                         wstate.pending_close_fds[remaining++] = fd;
+                    } else if (enqueue_pending_fd(wstate.overflow_close_fds, &wstate.overflow_close_count,
+                                                  fd)) {
+                        // Spilled to overflow list.
                     } else {
                         wstate.close_retry_overflow = true;
                     }
@@ -1038,6 +1052,9 @@ int worker_run(WorkerConfig* config) {
                 if (close_ret == -ENOSPC) {
                     if (remaining < MAX_PENDING_CLOSE) {
                         wstate.pending_orphan_close_fds[remaining++] = fd;
+                    } else if (enqueue_pending_fd(wstate.overflow_close_fds, &wstate.overflow_close_count,
+                                                  fd)) {
+                        // Spilled to overflow list.
                     } else {
                         wstate.close_retry_overflow = true;
                     }
@@ -1050,6 +1067,32 @@ int worker_run(WorkerConfig* config) {
             wstate.pending_orphan_close_count = remaining;
         }
 
+        // Drain overflow list: snapshot and clear before processing so that
+        // re-enqueues from repeated -ENOSPC go into a fresh queue.
+        if (wstate.overflow_close_count > 0) {
+            int snapshot_fds[MAX_PENDING_CLOSE];
+            int snapshot_count = wstate.overflow_close_count;
+            std::memcpy(snapshot_fds, wstate.overflow_close_fds,
+                        static_cast<size_t>(snapshot_count) * sizeof(int));
+            wstate.overflow_close_count = 0;
+
+            for (int i = 0; i < snapshot_count; i++) {
+                int fd = snapshot_fds[i];
+                if (fd < 0 || fd >= MAX_CONNECTIONS)
+                    continue;
+                Connection* conn = conns[fd];
+                if (conn) {
+                    if (!conn->closing || conn->close_submitted || conn->send_inflight)
+                        continue;
+                    conn->close_in_retry_queue = false;
+                    submit_close_or_defer(fd, conns, &config->ops, config->backend, &wstate, &tx_pool);
+                } else {
+                    submit_orphan_close_or_defer(fd, &config->ops, config->backend, &wstate);
+                }
+            }
+        }
+
+        // Last resort: full scan only when overflow list itself overflowed.
         if (wstate.close_retry_overflow) {
             wstate.close_retry_overflow = false;
             for (int fd = 0; fd < MAX_CONNECTIONS; fd++) {

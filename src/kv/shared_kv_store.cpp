@@ -205,8 +205,13 @@ static uint32_t secondary_bucket(uint64_t hash, uint32_t bucket_mask, uint32_t b
 // Return pointer to one lane in flat slot array.
 static inline std::atomic<Node*>* slot_ptr(Shard* shard, uint32_t bucket_idx, uint32_t lane) {
     ASSERT(shard != nullptr, "slot_ptr requires shard");
-    ASSERT(bucket_idx < shard->bucket_count, "bucket index out of range");
     ASSERT(lane < KV_BUCKET_SLOTS, "bucket lane out of range");
+    // Hard bounds check kept in release builds: a corrupted bucket_mask would
+    // cause silent OOB heap access, and this branch is well-predicted.
+    if (bucket_idx >= shard->bucket_count) {
+        ASSERT(false, "bucket index out of range");
+        __builtin_trap();
+    }
     return &shard->slots[static_cast<size_t>(bucket_idx) * KV_BUCKET_SLOTS + lane];
 }
 
@@ -328,8 +333,14 @@ static bool pool_grow(ClassPool* pool) {
 }
 
 // Batch-refill local cache from global Treiber stack.
+// Bounded total iterations prevents indefinite spinning under contention
+// (both pool_grow retries and CAS contention).
 static bool local_cache_refill(ClassPool* pool, LocalClassCache* cache) {
+    static constexpr uint32_t MAX_ITERATIONS = LOCAL_CACHE_BATCH * 8;
+    uint32_t iterations = 0;
     for (uint32_t filled = 0; filled < LOCAL_CACHE_BATCH;) {
+        if (iterations++ >= MAX_ITERATIONS)
+            return filled > 0;
         FreeChunk* head = pool->free_head.load(std::memory_order_acquire);
         if (!head) {
             if (!pool_grow(pool))
@@ -927,8 +938,11 @@ KvGetStatus kv_store_get(KvStore* store, uint32_t worker_id, std::string_view ke
 
             ws->touch_counter++;
             // Sampled refbit write lowers write-amplification on hot reads.
+            // Relaxed ordering is intentional: approximate visibility is
+            // acceptable here. A concurrent eviction thread may occasionally
+            // miss a refbit update and evict a hot key — this is a deliberate
+            // trade-off for lower cache-coherence traffic on reads.
             if ((ws->touch_counter & KV_TOUCH_SAMPLE_MASK) == 0) {
-                // Avoid cross-core cacheline ping-pong when bit is already hot.
                 if (node->refbit.load(std::memory_order_relaxed) == 0)
                     node->refbit.store(1, std::memory_order_relaxed);
             }
@@ -1122,8 +1136,13 @@ uint64_t kv_store_capacity_bytes(const KvStore* store) {
 uint64_t kv_time_now_ms() {
     // Real-time clock helper for callers that do not provide their own time.
     struct timespec ts = {};
-    if (clock_gettime(CLOCK_REALTIME, &ts) != 0)
-        return 0;
+    int ret = clock_gettime(CLOCK_REALTIME, &ts);
+    // clock_gettime(CLOCK_REALTIME) should never fail on Linux (vDSO).
+    // No safe sentinel exists: 0 breaks TTL-less paths, UINT64_MAX expires
+    // all TTL keys. If the clock is broken, abort — nothing works correctly.
+    ASSERT(ret == 0, "clock_gettime(CLOCK_REALTIME) failed unexpectedly");
+    if (ret != 0)
+        std::abort();
     uint64_t sec = static_cast<uint64_t>(ts.tv_sec);
     uint64_t nsec = static_cast<uint64_t>(ts.tv_nsec);
     return sec * 1000ull + nsec / 1000000ull;

@@ -407,3 +407,44 @@ TEST(SharedKvApi, TimeHelperReturnsReasonableValue) {
     EXPECT_GT(t1, 0u);
     EXPECT_GE(t2, t1);
 }
+
+// --- T12: Unregistered worker returns MISS ---
+
+TEST(SharedKvApi, UnregisteredWorkerGetReturnsMiss) {
+    KvStoreConfig cfg = {
+        .capacity_bytes = 1ull << 20,
+        .shard_count = 1,
+        .buckets_per_shard = 16,
+        .worker_count = 2,
+    };
+    KvStore* s = kv_store_create(&cfg);
+    ASSERT_NE(s, nullptr);
+
+    // Register worker 0 but not worker 1
+    ASSERT_EQ(kv_store_register_worker(s, 0), 0);
+    ASSERT_EQ(kv_store_set(s, 0, "key", "val", 10, nullptr), KvSetStatus::OK);
+
+    // Worker 1 is not registered — GET should return MISS, not crash
+    KvValueView out = {};
+    EXPECT_EQ(kv_store_get(s, 1, "key", 10, &out), KvGetStatus::MISS);
+    EXPECT_EQ(out.data, nullptr);
+
+    kv_store_destroy(s);
+}
+
+TEST(SharedKvApi, UnregisteredWorkerSetFails) {
+    KvStoreConfig cfg = {
+        .capacity_bytes = 1ull << 20,
+        .shard_count = 1,
+        .buckets_per_shard = 16,
+        .worker_count = 2,
+    };
+    KvStore* s = kv_store_create(&cfg);
+    ASSERT_NE(s, nullptr);
+
+    // Worker 0 is not registered — SET should fail gracefully
+    KvSetStatus status = kv_store_set(s, 0, "key", "val", 10, nullptr);
+    EXPECT_NE(status, KvSetStatus::OK);
+
+    kv_store_destroy(s);
+}
