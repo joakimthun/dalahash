@@ -823,8 +823,10 @@ static void handle_recv(const IoCompletion* comp, Connection** conns, ProtocolWo
     }
 
 recycle:
-    ASSERT(conn->input_len <= CONN_BUF_SIZE, "input_len exceeds connection buffer");
-    tx_assert_conn_invariants(conn);
+    if (conns[fd]) {
+        ASSERT(conn->input_len <= CONN_BUF_SIZE, "input_len exceeds connection buffer");
+        tx_assert_conn_invariants(conn);
+    }
     if (comp->buf)
         recycle_add(recycle, comp->buf_id);
 }
