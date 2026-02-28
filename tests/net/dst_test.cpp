@@ -767,6 +767,35 @@ TEST(DSTIntegration, SendFailClosesConnection) {
     EXPECT_TRUE(was_closed);
 }
 
+TEST(DSTIntegration, SendSubmitFailurePermanentCloseFailureDoesNotRetry) {
+    SimIoBackend sim_setup;
+    std::string ping = "*1\r\n$4\r\nPING\r\n";
+
+    SimIoBackend sim;
+    sim.pending.push_back(sim_accept(10));
+    sim.pending.push_back(sim_recv(&sim_setup, 10, ping.data(), static_cast<uint32_t>(ping.size())));
+    sim.submit_send_fail_count = 1;
+    sim.submit_close_fail_count = 4;
+    sim.submit_close_fail_errno = -EINVAL;
+
+    std::atomic<bool> running{true};
+    sim.running = &running;
+
+    WorkerConfig config = {};
+    config.cpu_id = 0;
+    config.ops = sim_io_ops();
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
+    config.running = &running;
+    config.skip_setup = true;
+    config.listen_fd = 0;
+
+    worker_run(&config);
+
+    EXPECT_EQ(sim.send_call_count, 0);
+    EXPECT_EQ(sim.submit_close_call_count, 1);
+    EXPECT_TRUE(sim.closed_fds.empty());
+}
+
 TEST(DSTIntegration, PendingCloseRetrySucceeds) {
     SimIoBackend sim_setup;
     std::string bad = "GARBAGE\r\n";
@@ -870,6 +899,49 @@ TEST(DSTIntegration, RecvAfterMultishotTermination) {
         }
     }
     EXPECT_TRUE(rearmed);
+}
+
+TEST(DSTIntegration, RecvRearmFailurePermanentCloseFailureDoesNotRetry) {
+    SimIoBackend sim_setup;
+    std::string partial = "*1\r\n$4\r\nPING\r";
+
+    std::vector<uint8_t> partial_buf(partial.begin(), partial.end());
+
+    IoCompletion recv_nomore = {};
+    recv_nomore.kind = IoCompletion::RECV;
+    recv_nomore.fd = 10;
+    recv_nomore.result = static_cast<int>(partial_buf.size());
+    recv_nomore.buf = partial_buf.data();
+    recv_nomore.buf_len = static_cast<uint32_t>(partial_buf.size());
+    recv_nomore.buf_id = 99;
+    recv_nomore.more = false;
+
+    SimIoBackend sim;
+    sim.pending.push_back(sim_accept(10));
+    sim.pending.push_back(recv_nomore);
+    sim.submit_recv_fail_after_successes = 1;
+    sim.submit_close_fail_count = 4;
+    sim.submit_close_fail_errno = -EINVAL;
+
+    std::atomic<bool> running{true};
+    sim.running = &running;
+
+    WorkerConfig config = {};
+    config.cpu_id = 0;
+    config.ops = sim_io_ops();
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
+    config.running = &running;
+    config.skip_setup = true;
+    config.listen_fd = 0;
+
+    worker_run(&config);
+
+    ASSERT_EQ(sim.recv_armed.size(), 1u);
+    EXPECT_EQ(sim.recv_armed[0], 10);
+    ASSERT_EQ(sim.recycled_buf_ids.size(), 1u);
+    EXPECT_EQ(sim.recycled_buf_ids[0], 99);
+    EXPECT_EQ(sim.submit_close_call_count, 1);
+    EXPECT_TRUE(sim.closed_fds.empty());
 }
 
 TEST(DSTIntegration, NoCommandExecutionWhenClosing) {
@@ -1028,6 +1100,44 @@ TEST(DSTIntegration, MultipleChunkedSends) {
         expected += "+PONG\r\n";
     EXPECT_EQ(sim.sent_data[10], expected);
     EXPECT_EQ(sim.send_call_count, 3);
+}
+
+TEST(DSTIntegration, PartialSendResubmitFailurePermanentCloseFailureDoesNotRetry) {
+    SimIoBackend sim_setup;
+    std::string pings;
+    for (int i = 0; i < 5; i++)
+        pings += "*1\r\n$4\r\nPING\r\n";
+
+    SimIoBackend sim;
+    sim.pending.push_back(sim_accept(10));
+    sim.pending.push_back(sim_recv(&sim_setup, 10, pings.data(), static_cast<uint32_t>(pings.size())));
+    sim.copy_send_on_wait = true;
+    sim.scripted_send_results = {10};
+    sim.submit_send_fail_after_successes = 1;
+    sim.submit_close_fail_count = 4;
+    sim.submit_close_fail_errno = -EINVAL;
+
+    std::atomic<bool> running{true};
+    sim.running = &running;
+
+    WorkerConfig config = {};
+    config.cpu_id = 0;
+    config.ops = sim_io_ops();
+    config.backend = reinterpret_cast<IoBackend*>(&sim);
+    config.running = &running;
+    config.skip_setup = true;
+    config.listen_fd = 0;
+
+    worker_run(&config);
+
+    std::string expected;
+    for (int i = 0; i < 5; i++)
+        expected += "+PONG\r\n";
+
+    EXPECT_EQ(sim.send_call_count, 1);
+    EXPECT_EQ(sim.sent_data[10], expected.substr(0, 10));
+    EXPECT_EQ(sim.submit_close_call_count, 1);
+    EXPECT_TRUE(sim.closed_fds.empty());
 }
 
 TEST(DSTIntegration, BufferRecycling) {

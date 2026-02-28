@@ -577,6 +577,8 @@ static void submit_orphan_close_or_defer(int fd, IoOps* ops, IoBackend* backend,
 //   2) TCP write order follows queue order.
 //   3) Short sends are retried from exact byte offset.
 //   4) Close retries happen only on transient SQ saturation (-ENOSPC).
+// Callers must treat any local conn pointer as invalid after try_close(); a
+// permanent close-submit failure destroys the connection synchronously.
 //  Attempt to close a connection. If a SEND is in flight, defer the close until
 // that SEND completion arrives so no user buffer is freed early.
 //
@@ -813,13 +815,21 @@ static void handle_recv(const IoCompletion* comp, Connection** conns, ProtocolWo
 
     // Kick TX for this connection if idle.
     if (!conn->closing && !conn->send_inflight && conn->tx_head) {
-        if (submit_tx_head(conn, ops, backend) < 0)
+        if (submit_tx_head(conn, ops, backend) < 0) {
             try_close(fd, conns, ops, backend, state, pool);
+            // try_close() may synchronously destroy conn on a permanent
+            // close-submit failure, so do not fall through with the local ptr.
+            goto recycle;
+        }
     }
 
     if (!conn->closing && !comp->more) {
-        if (ops->submit_recv(backend, fd) < 0)
+        if (ops->submit_recv(backend, fd) < 0) {
             try_close(fd, conns, ops, backend, state, pool);
+            // Route through recycle for the same reason: conn may already be
+            // gone, but the provided recv buffer still must be returned.
+            goto recycle;
+        }
     }
 
 recycle:
@@ -895,8 +905,11 @@ static void handle_send(const IoCompletion* comp, Connection** conns, IoOps* ops
 
     // Partial sends naturally continue from tx_head_sent.
     if (conn->tx_head) {
-        if (submit_tx_head(conn, ops, backend) < 0)
+        if (submit_tx_head(conn, ops, backend) < 0) {
             try_close(fd, conns, ops, backend, state, pool);
+            // A permanent close-submit failure can free conn immediately.
+            return;
+        }
     }
     tx_assert_conn_invariants(conn);
 }

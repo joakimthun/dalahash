@@ -46,7 +46,13 @@ struct SimIoBackend {
     // and the counter is decremented.
     int submit_accept_fail_count = 0;
     int submit_recv_fail_count = 0;
+    // Countdown of successful recv submissions before later submit_recv calls
+    // start failing with -ENOSPC. -1 disables the delayed failure.
+    int submit_recv_fail_after_successes = -1;
     int submit_send_fail_count = 0;
+    // Countdown of successful send submissions before later submit_send calls
+    // start failing with -ENOSPC. -1 disables the delayed failure.
+    int submit_send_fail_after_successes = -1;
     int submit_close_fail_count = 0;
     int submit_close_fail_errno = -ENOSPC;
 };
@@ -70,7 +76,11 @@ static int sim_submit_recv(IoBackend* ctx, int fd) {
         be->submit_recv_fail_count--;
         return -ENOSPC;
     }
+    if (be->submit_recv_fail_after_successes == 0)
+        return -ENOSPC;
     be->recv_armed.push_back(fd);
+    if (be->submit_recv_fail_after_successes > 0)
+        be->submit_recv_fail_after_successes--;
     return 0;
 }
 
@@ -80,6 +90,8 @@ static int sim_submit_send(IoBackend* ctx, int fd, const uint8_t* data, uint32_t
         be->submit_send_fail_count--;
         return -ENOSPC;
     }
+    if (be->submit_send_fail_after_successes == 0)
+        return -ENOSPC;
     be->send_call_count++;
 
     if (be->copy_send_on_wait) {
@@ -87,6 +99,8 @@ static int sim_submit_send(IoBackend* ctx, int fd, const uint8_t* data, uint32_t
     } else {
         be->sent_data[fd].append(reinterpret_cast<const char*>(data), len);
     }
+    if (be->submit_send_fail_after_successes > 0)
+        be->submit_send_fail_after_successes--;
 
     int result = static_cast<int>(len);
     if (be->scripted_send_result_index < be->scripted_send_results.size())
