@@ -45,6 +45,15 @@ if(DALAHASH_PROTOCOL STREQUAL "redis")
     target_compile_definitions(io_uring_integration_tests PRIVATE
         DALAHASH_BINARY_PATH="$<TARGET_FILE:dalahash>"
     )
+
+    # Fuzz tests — real server, raw TCP, malformed/random input
+    add_executable(fuzz_tests
+        net/fuzz_test.cpp
+    )
+    target_link_libraries(fuzz_tests GTest::gtest_main)
+    target_compile_definitions(fuzz_tests PRIVATE
+        DALAHASH_BINARY_PATH="$<TARGET_FILE:dalahash>"
+    )
 elseif(DALAHASH_PROTOCOL STREQUAL "echo")
     # DST tests — deterministic simulation for echo protocol
     add_executable(dst_echo_tests
@@ -80,4 +89,7 @@ if(TARGET dst_echo_tests)
 endif()
 if(TARGET echo_integration_tests)
     gtest_discover_tests(echo_integration_tests DISCOVERY_MODE PRE_TEST)
+endif()
+if(TARGET fuzz_tests)
+    gtest_discover_tests(fuzz_tests DISCOVERY_MODE PRE_TEST)
 endif()
