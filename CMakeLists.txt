@@ -118,6 +118,24 @@ if(ENABLE_BENCHMARKS)
     add_subdirectory(bench)
 endif()
 
+# Only register the benchmark target when the build is Redis-protocol Release,
+# since the script drives memtier_benchmark which speaks Redis.
+if(DALAHASH_PROTOCOL STREQUAL "redis")
+    add_custom_target(benchmark
+        COMMAND ${CMAKE_SOURCE_DIR}/bench/run_benchmark.sh --binary $<TARGET_FILE:dalahash>
+        DEPENDS dalahash
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Running end-to-end benchmark with memtier_benchmark"
+        VERBATIM
+    )
+else()
+    add_custom_target(benchmark
+        COMMAND ${CMAKE_COMMAND} -E echo "ERROR: benchmark target requires DALAHASH_PROTOCOL=redis (current: ${DALAHASH_PROTOCOL})"
+        COMMAND ${CMAKE_COMMAND} -E false
+        COMMENT "Benchmark requires Redis protocol build"
+    )
+endif()
+
 find_program(DALAHASH_CLANG_FORMAT NAMES clang-format-21 clang-format)
 if(DALAHASH_CLANG_FORMAT)
     file(GLOB_RECURSE DALAHASH_FORMAT_FILES CONFIGURE_DEPENDS

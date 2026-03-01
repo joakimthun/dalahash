@@ -1,6 +1,8 @@
 build/
 build-release/
 build_release/
+build-release-bench/
+build_release_bench/
 build-echo/
 build_echo/
 build-redis/
