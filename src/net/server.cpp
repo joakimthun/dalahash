@@ -2,6 +2,7 @@
 
 #include "server.h"
 #include "base/assert.h"
+#include "connection.h"
 #include "io_uring_backend.h"
 #include "kv/shared_kv_store.h"
 #include "worker.h"
@@ -12,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <pthread.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 static std::atomic<bool> g_running{true};
@@ -35,6 +37,85 @@ static void* worker_thread_fn(void* arg) {
 static constexpr uint32_t RING_SIZE = 4096;
 static constexpr uint32_t BUF_COUNT = 1024; // provided buffers per worker
 static constexpr uint32_t BUF_SIZE = 4096;
+static constexpr uint64_t PROCESS_FD_RESERVE = 64;
+static constexpr uint64_t PER_WORKER_FD_OVERHEAD = 4;
+
+struct WorkerResourcePlan {
+    int num_workers;
+    uint32_t fixed_files_per_worker;
+    unsigned long long nofile_soft_limit;
+};
+
+//  Derive a startup plan that fits inside the process RLIMIT_NOFILE soft limit.
+//
+// The hot-path requirement is driven by the io_uring fixed-file table:
+// each worker registers one sparse table for accepted client sockets, plus a
+// small number of always-open process/worker fds (listen sockets, ring fds,
+// stdio, etc). We therefore:
+//   1) reserve a small process-wide fd cushion first
+//   2) ensure each worker gets at least one usable fixed-file slot
+//   3) reduce worker count if the requested count cannot satisfy (2)
+//   4) divide the remaining fd budget evenly across the final worker count
+//
+// This keeps startup deterministic on low-limit hosts: the process either
+// starts with an explicit cap, or fails early when even one worker cannot fit.
+static WorkerResourcePlan plan_worker_resources(int requested_workers) {
+    ASSERT(requested_workers > 0, "requested_workers must be positive");
+
+    WorkerResourcePlan plan = {
+        .num_workers = requested_workers,
+        .fixed_files_per_worker = static_cast<uint32_t>(MAX_CONNECTIONS),
+        .nofile_soft_limit = 0,
+    };
+
+    struct rlimit nofile = {};
+    if (getrlimit(RLIMIT_NOFILE, &nofile) != 0)
+        return plan;
+    if (nofile.rlim_cur == RLIM_INFINITY)
+        return plan;
+
+    uint64_t soft_limit = static_cast<uint64_t>(nofile.rlim_cur);
+    plan.nofile_soft_limit = static_cast<unsigned long long>(soft_limit);
+
+    // Keep a small process-wide reserve so startup and normal runtime fds
+    // outside the fixed-file tables do not consume the full soft limit.
+    uint64_t budget = soft_limit;
+    if (budget > PROCESS_FD_RESERVE) {
+        budget -= PROCESS_FD_RESERVE;
+    } else {
+        budget = 0;
+    }
+
+    // Every worker needs its non-client fd overhead plus at least one fixed
+    // file slot. If we cannot afford that minimum, startup should fail early.
+    const uint64_t min_worker_cost = PER_WORKER_FD_OVERHEAD + 1;
+    if (budget < min_worker_cost) {
+        plan.num_workers = 0;
+        plan.fixed_files_per_worker = 0;
+        return plan;
+    }
+
+    // Clamp the worker count before computing per-worker capacity. This favors
+    // keeping all remaining workers identical rather than starting a subset
+    // with oversized tables and failing later workers during backend init.
+    uint64_t max_workers = budget / min_worker_cost;
+    if (max_workers == 0)
+        max_workers = 1;
+    if (static_cast<uint64_t>(plan.num_workers) > max_workers)
+        plan.num_workers = static_cast<int>(max_workers);
+
+    // Split the remaining budget evenly across the final worker count, then
+    // convert each worker's slice into the number of io_uring fixed-file slots
+    // left after subtracting that worker's non-client fd overhead.
+    uint64_t per_worker_budget = budget / static_cast<uint64_t>(plan.num_workers);
+    uint64_t fixed_files = 1;
+    if (per_worker_budget > PER_WORKER_FD_OVERHEAD)
+        fixed_files = per_worker_budget - PER_WORKER_FD_OVERHEAD;
+    if (fixed_files > static_cast<uint64_t>(MAX_CONNECTIONS))
+        fixed_files = static_cast<uint64_t>(MAX_CONNECTIONS);
+    plan.fixed_files_per_worker = static_cast<uint32_t>(fixed_files);
+    return plan;
+}
 
 int server_start(const ServerConfig* config) {
     ASSERT(config != nullptr, "server_start requires config");
@@ -50,6 +131,24 @@ int server_start(const ServerConfig* config) {
             num_workers = 1;
     }
     ASSERT(num_workers > 0, "num_workers must be positive");
+
+    WorkerResourcePlan resource_plan = plan_worker_resources(num_workers);
+    if (resource_plan.num_workers <= 0 || resource_plan.fixed_files_per_worker == 0) {
+        std::fprintf(stderr, "dalahash: RLIMIT_NOFILE soft limit %llu is too low to start any worker\n",
+                     resource_plan.nofile_soft_limit);
+        return 1;
+    }
+    if (resource_plan.num_workers != num_workers) {
+        std::fprintf(stderr,
+                     "dalahash: reducing workers from %d to %d to fit RLIMIT_NOFILE soft limit %llu\n",
+                     num_workers, resource_plan.num_workers, resource_plan.nofile_soft_limit);
+        num_workers = resource_plan.num_workers;
+    }
+    if (resource_plan.fixed_files_per_worker < static_cast<uint32_t>(MAX_CONNECTIONS)) {
+        std::fprintf(stderr,
+                     "dalahash: limiting fixed-file slots to %u per worker (RLIMIT_NOFILE soft limit %llu)\n",
+                     resource_plan.fixed_files_per_worker, resource_plan.nofile_soft_limit);
+    }
 
     std::fprintf(stderr, "dalahash: starting %d workers on port %d\n", num_workers, config->port);
 
@@ -94,7 +193,8 @@ int server_start(const ServerConfig* config) {
     }
 
     for (int i = 0; i < num_workers; i++) {
-        IoBackend* backend = io_uring_backend_create(RING_SIZE, BUF_COUNT, BUF_SIZE);
+        IoBackend* backend =
+            io_uring_backend_create(RING_SIZE, BUF_COUNT, BUF_SIZE, resource_plan.fixed_files_per_worker);
         if (!backend) {
             std::fprintf(stderr, "dalahash: backend create failed for worker %d\n", i);
             g_running.store(false, std::memory_order_relaxed);

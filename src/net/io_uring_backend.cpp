@@ -99,6 +99,7 @@ struct UringBackend {
     uint32_t ring_size;
     uint32_t buf_count;
     uint32_t buf_size;
+    uint32_t max_files;
     bool ring_initialized;
     //  IORING_FEAT_NODROP: kernel queues overflowed CQEs in a backlog instead
     // of silently dropping them. We use this to detect CQ overflow at runtime.
@@ -115,6 +116,8 @@ static int uring_init(IoBackend* ctx) {
     ASSERT(be->buf_count > 0, "buf_count must be non-zero");
     ASSERT(is_power_of_two_u32(be->buf_count), "buf_count must be power of two");
     ASSERT(be->buf_size > 0, "buf_size must be non-zero");
+    ASSERT(be->max_files > 0, "max_files must be non-zero");
+    ASSERT(be->max_files <= static_cast<uint32_t>(MAX_CONNECTIONS), "max_files exceeds MAX_CONNECTIONS");
     ASSERT(be->buf_pool != nullptr, "buf_pool must be allocated");
 
     //  io_uring_setup(2) flags — each one tightens the kernel/userspace contract
@@ -225,13 +228,13 @@ static int uring_init(IoBackend* ctx) {
     }
     io_uring_buf_ring_advance(be->buf_ring, static_cast<int>(be->buf_count));
 
-    //  io_uring_register_files_sparse(3) — pre-registers MAX_CONNECTIONS empty
-    // slots in the kernel's fixed file table for this ring. Slots are populated
+    //  io_uring_register_files_sparse(3) — pre-registers max_files empty slots
+    // in the kernel's fixed file table for this ring. Slots are populated
     // on-demand by accept_direct (IORING_FILE_INDEX_ALLOC). Once registered, all
     // recv/send/close SQEs reference these slots via IOSQE_FIXED_FILE, which
     // eliminates the atomic fget/fput the kernel performs for each I/O operation
     // on a normal (non-registered) fd.
-    ret = io_uring_register_files_sparse(&be->ring, MAX_CONNECTIONS);
+    ret = io_uring_register_files_sparse(&be->ring, static_cast<unsigned>(be->max_files));
     if (ret < 0) {
         std::fprintf(stderr, "io_uring_register_files_sparse failed: %s\n", std::strerror(-ret));
         return ret;
@@ -558,7 +561,8 @@ static int uring_wait(IoBackend* ctx, IoCompletion* out, int max_completions) {
             // (not an OS fd). This index is used for all subsequent recv/send/
             // close SQEs via IOSQE_FIXED_FILE, and as the conns[] table key.
             ASSERT(cqe->res >= 0, "accept completion produced negative fd index");
-            ASSERT(cqe->res < MAX_CONNECTIONS, "accept completion fd index out of range");
+            ASSERT(cqe->res < static_cast<int>(be->max_files),
+                   "accept completion fd index exceeds max_files");
             c->fd = cqe->res;
         }
 
@@ -619,10 +623,13 @@ IoOps io_uring_ops() {
 // buf_pool is one contiguous allocation of buf_count * buf_size bytes. During
 // uring_init, it gets sliced into buf_count individual buffers and registered
 // with the kernel's provided buffer ring.
-IoBackend* io_uring_backend_create(uint32_t ring_size, uint32_t buf_count, uint32_t buf_size) {
+IoBackend* io_uring_backend_create(uint32_t ring_size, uint32_t buf_count, uint32_t buf_size,
+                                   uint32_t max_files) {
     ASSERT(ring_size > 0, "ring_size must be non-zero");
     ASSERT(buf_count > 0, "buf_count must be non-zero");
     ASSERT(buf_size > 0, "buf_size must be non-zero");
+    ASSERT(max_files > 0, "max_files must be non-zero");
+    ASSERT(max_files <= static_cast<uint32_t>(MAX_CONNECTIONS), "max_files exceeds MAX_CONNECTIONS");
     ASSERT(is_power_of_two_u32(buf_count), "buf_count must be power of two");
     auto* be = static_cast<UringBackend*>(std::calloc(1, sizeof(UringBackend)));
     if (!be)
@@ -630,6 +637,7 @@ IoBackend* io_uring_backend_create(uint32_t ring_size, uint32_t buf_count, uint3
     be->ring_size = ring_size;
     be->buf_count = buf_count;
     be->buf_size = buf_size;
+    be->max_files = max_files;
     be->buf_pool = static_cast<uint8_t*>(std::calloc(buf_count, buf_size));
     if (!be->buf_pool) {
         std::free(be);
