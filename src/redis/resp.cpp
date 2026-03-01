@@ -4,8 +4,24 @@
 #include "base/assert.h"
 
 #include <climits>
-#include <cstdio>
 #include <cstring>
+
+// Fast decimal formatting for uint32_t. Returns number of bytes written.
+// Caller must ensure out has at least 10 bytes of space.
+static uint32_t uint_to_str(uint8_t* out, uint32_t val) {
+    // Digit table avoids repeated division for two-digit groups.
+    static constexpr char digits[] = "0123456789";
+    uint8_t tmp[10];
+    uint32_t n = 0;
+    do {
+        tmp[n++] = static_cast<uint8_t>(digits[val % 10]);
+        val /= 10;
+    } while (val > 0);
+    // Reverse into output.
+    for (uint32_t i = 0; i < n; i++)
+        out[i] = tmp[n - 1 - i];
+    return n;
+}
 
 enum class ParseIntStatus : uint8_t { OK, INCOMPLETE, ERROR };
 
@@ -178,7 +194,7 @@ uint32_t resp_write_bulk(uint8_t* out, const uint8_t* data, uint32_t len) {
     ASSERT(data != nullptr || len == 0, "resp_write_bulk null data with non-zero length");
     uint32_t n = 0;
     out[n++] = '$';
-    n += static_cast<uint32_t>(std::snprintf(reinterpret_cast<char*>(out) + n, 20, "%u", len));
+    n += uint_to_str(out + n, len);
     out[n++] = '\r';
     out[n++] = '\n';
     if (len > 0)
@@ -195,10 +211,18 @@ uint32_t resp_write_error(uint8_t* out, const char* msg) {
     ASSERT(msg != nullptr, "resp_write_error requires message");
     if (!out || !msg)
         return 0;
-    int n = std::snprintf(reinterpret_cast<char*>(out), 512, "-ERR %s\r\n", msg);
-    if (n <= 0)
-        return 0;
-    return static_cast<uint32_t>(n >= 512 ? 511 : n);
+    // Manual formatting: "-ERR <msg>\r\n", capped at 512 bytes total.
+    std::memcpy(out, "-ERR ", 5);
+    uint32_t n = 5;
+    size_t msg_len = std::strlen(msg);
+    // Cap so total output <= 511 bytes (matches snprintf(buf,512) which returns at most 511).
+    if (msg_len > 511 - 5 - 2)
+        msg_len = 511 - 5 - 2;
+    std::memcpy(out + n, msg, msg_len);
+    n += static_cast<uint32_t>(msg_len);
+    out[n++] = '\r';
+    out[n++] = '\n';
+    return n;
 }
 
 // Emit "+PONG\r\n" — RESP simple string reply to PING.

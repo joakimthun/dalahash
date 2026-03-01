@@ -693,7 +693,7 @@ static void handle_accept(const IoCompletion* comp, Connection** conns, IoOps* o
 
 static void handle_recv(const IoCompletion* comp, Connection** conns, ProtocolWorkerState* protocol_state,
                         IoOps* ops, IoBackend* backend, WorkerState* state, RecycleBatch* recycle,
-                        TxSlabPool* pool) {
+                        TxSlabPool* pool, uint64_t now_ms) {
     ASSERT(comp != nullptr, "handle_recv requires completion");
     ASSERT(conns != nullptr, "handle_recv requires conns table");
     ASSERT(protocol_state != nullptr, "handle_recv requires protocol state");
@@ -737,7 +737,6 @@ static void handle_recv(const IoCompletion* comp, Connection** conns, ProtocolWo
     uint32_t parse_len = 0;
     bool parsing_from_input_buf = false;
     uint32_t offset = 0;
-    uint64_t now_ms = 0;
     uint8_t response_buf[RESPONSE_BUF_SIZE];
 
     //  Reassembly path: append new bytes directly into conn->input_buf so parser
@@ -757,8 +756,6 @@ static void handle_recv(const IoCompletion* comp, Connection** conns, ProtocolWo
         parse_buf = comp->buf;
         parse_len = comp->buf_len;
     }
-
-    now_ms = protocol_now_ms();
 
     while (offset < parse_len) {
         ProtocolCommand cmd = {};
@@ -1132,6 +1129,9 @@ int worker_run(WorkerConfig* config) {
 
         RecycleBatch recycle = {};
 
+        // Batch timestamp: one clock_gettime per wait batch instead of per recv.
+        uint64_t batch_now_ms = protocol_now_ms();
+
         for (int i = 0; i < n; i++) {
             IoCompletion* c = &completions[i];
             switch (c->kind) {
@@ -1140,7 +1140,7 @@ int worker_run(WorkerConfig* config) {
                 break;
             case IoCompletion::RECV:
                 handle_recv(c, conns, &protocol_state, &config->ops, config->backend, &wstate, &recycle,
-                            &tx_pool);
+                            &tx_pool, batch_now_ms);
                 break;
             case IoCompletion::SEND:
                 handle_send(c, conns, &config->ops, config->backend, &wstate, &tx_pool);

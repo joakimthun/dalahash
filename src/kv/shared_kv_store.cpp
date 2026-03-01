@@ -149,31 +149,56 @@ static uint32_t next_pow2_u32(uint32_t v) {
 }
 
 static uint64_t hash_bytes(std::string_view v) {
-    // Bulk multiply-xorshift hash: processes 8 bytes per iteration.
     const uint8_t* p = reinterpret_cast<const uint8_t*>(v.data());
     size_t len = v.size();
     uint64_t h = 0x9e3779b97f4a7c15ull ^ (static_cast<uint64_t>(len) * 0xff51afd7ed558ccdull);
 
-    // 8-byte chunks
-    while (len >= 8) {
+    // Fast path for short keys (common: "key:NNNNN" = 9-12 bytes).
+    if (len <= 8) {
+        // Single partial load covers the entire key.
+        uint64_t k = 0;
+        if (len > 0)
+            std::memcpy(&k, p, len);
+        k *= 0xbf58476d1ce4e5b9ull;
+        k ^= k >> 31;
+        h ^= k;
+        h *= 0x94d049bb133111ebull;
+    } else if (len <= 16) {
+        // Two loads cover 9-16 byte keys with no loop overhead.
         uint64_t k;
         std::memcpy(&k, p, 8);
         k *= 0xbf58476d1ce4e5b9ull;
         k ^= k >> 31;
         h ^= k;
         h *= 0x94d049bb133111ebull;
-        p += 8;
-        len -= 8;
-    }
 
-    // Tail bytes
-    if (len > 0) {
-        uint64_t k = 0;
-        std::memcpy(&k, p, len);
-        k *= 0xbf58476d1ce4e5b9ull;
-        k ^= k >> 31;
-        h ^= k;
+        uint64_t k2 = 0;
+        std::memcpy(&k2, p + 8, len - 8);
+        k2 *= 0xbf58476d1ce4e5b9ull;
+        k2 ^= k2 >> 31;
+        h ^= k2;
         h *= 0x94d049bb133111ebull;
+    } else {
+        // General path: 8-byte chunks + tail.
+        size_t remaining = len;
+        while (remaining >= 8) {
+            uint64_t k;
+            std::memcpy(&k, p, 8);
+            k *= 0xbf58476d1ce4e5b9ull;
+            k ^= k >> 31;
+            h ^= k;
+            h *= 0x94d049bb133111ebull;
+            p += 8;
+            remaining -= 8;
+        }
+        if (remaining > 0) {
+            uint64_t k = 0;
+            std::memcpy(&k, p, remaining);
+            k *= 0xbf58476d1ce4e5b9ull;
+            k ^= k >> 31;
+            h ^= k;
+            h *= 0x94d049bb133111ebull;
+        }
     }
 
     // Final avalanche
@@ -911,6 +936,10 @@ KvGetStatus kv_store_get(KvStore* store, uint32_t worker_id, std::string_view ke
     uint32_t b1 = static_cast<uint32_t>(hash) & shard->bucket_mask;
     uint32_t b2 = secondary_bucket(hash, shard->bucket_mask, b1);
 
+    // Prefetch both candidate bucket slot arrays to overlap DRAM latency.
+    __builtin_prefetch(slot_ptr(shard, b1, 0), 0, 1);
+    __builtin_prefetch(slot_ptr(shard, b2, 0), 0, 1);
+
     const uint32_t buckets[2] = {b1, b2};
     for (uint32_t bi = 0; bi < 2; bi++) {
         uint32_t bucket = buckets[bi];
@@ -984,6 +1013,10 @@ KvSetStatus kv_store_set(KvStore* store, uint32_t worker_id, std::string_view ke
     Shard* shard = &store->shards[shard_idx];
     uint32_t b1 = static_cast<uint32_t>(hash) & shard->bucket_mask;
     uint32_t b2 = secondary_bucket(hash, shard->bucket_mask, b1);
+
+    // Prefetch both candidate bucket slot arrays to overlap DRAM latency.
+    __builtin_prefetch(slot_ptr(shard, b1, 0), 0, 1);
+    __builtin_prefetch(slot_ptr(shard, b2, 0), 0, 1);
 
     // Bounded retry loop under contention.
     for (uint32_t attempt = 0; attempt < 128; attempt++) {
