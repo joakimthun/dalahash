@@ -200,6 +200,12 @@ TEST(Command, CommandWithArgs) {
     EXPECT_EQ(exec(make_cmd({"COMMAND", "DOCS", "GET"}), &store), "*0\r\n");
 }
 
+static std::string exec_at(const RespCommand& cmd, Store* store, uint64_t now_ms) {
+    uint8_t buf[4096];
+    uint32_t n = command_execute(&cmd, store, now_ms, buf, sizeof(buf));
+    return std::string(reinterpret_cast<char*>(buf), n);
+}
+
 static std::string exec_sized(const RespCommand& cmd, Store* store, uint32_t buf_size) {
     std::vector<uint8_t> buf(buf_size);
     uint32_t n = command_execute(&cmd, store, 12345, buf.data(), buf_size);
@@ -252,4 +258,259 @@ TEST(Command, SetOOMReturnsErr) {
     EXPECT_NE(out.find("out of memory"), std::string::npos);
 
     kv_store_destroy(shared);
+}
+
+// --- SETEX tests ---
+
+TEST(Command, SetexThenGet) {
+    Store store;
+    EXPECT_EQ(exec(make_cmd({"SETEX", "k", "60", "myval"}), &store), "+OK\r\n");
+    EXPECT_EQ(exec(make_cmd({"GET", "k"}), &store), "$5\r\nmyval\r\n");
+}
+
+TEST(Command, SetexExpiration) {
+    Store store;
+    EXPECT_EQ(exec_at(make_cmd({"SETEX", "k", "1", "val"}), &store, 1000), "+OK\r\n");
+    // At 1500ms (within TTL), key should still be alive.
+    EXPECT_EQ(exec_at(make_cmd({"GET", "k"}), &store, 1500), "$3\r\nval\r\n");
+    // At 2001ms (past TTL), key should be expired.
+    EXPECT_EQ(exec_at(make_cmd({"GET", "k"}), &store, 2001), "$-1\r\n");
+}
+
+TEST(Command, SetexExpirationExactBoundary) {
+    Store store;
+    EXPECT_EQ(exec_at(make_cmd({"SETEX", "k", "1", "val"}), &store, 1000), "+OK\r\n");
+    // Store contract: expired when now_ms >= expire_at_ms. expire_at = 1000+1000 = 2000.
+    EXPECT_EQ(exec_at(make_cmd({"GET", "k"}), &store, 1999), "$3\r\nval\r\n");
+    EXPECT_EQ(exec_at(make_cmd({"GET", "k"}), &store, 2000), "$-1\r\n");
+}
+
+TEST(Command, SetexOverwritesExistingKey) {
+    Store store;
+    EXPECT_EQ(exec(make_cmd({"SET", "k", "old"}), &store), "+OK\r\n");
+    EXPECT_EQ(exec(make_cmd({"SETEX", "k", "60", "new"}), &store), "+OK\r\n");
+    EXPECT_EQ(exec(make_cmd({"GET", "k"}), &store), "$3\r\nnew\r\n");
+}
+
+TEST(Command, SetexOverwritesExistingSetex) {
+    Store store;
+    EXPECT_EQ(exec_at(make_cmd({"SETEX", "k", "1", "first"}), &store, 1000), "+OK\r\n");
+    EXPECT_EQ(exec_at(make_cmd({"SETEX", "k", "100", "second"}), &store, 1000), "+OK\r\n");
+    // Original 1s TTL would have expired at 2001, but new 100s TTL keeps it alive.
+    EXPECT_EQ(exec_at(make_cmd({"GET", "k"}), &store, 5000), "$6\r\nsecond\r\n");
+}
+
+TEST(Command, SetexThenSetRemovesTTL) {
+    Store store;
+    EXPECT_EQ(exec_at(make_cmd({"SETEX", "k", "1", "expiring"}), &store, 1000), "+OK\r\n");
+    // Overwrite with plain SET (no TTL).
+    EXPECT_EQ(exec_at(make_cmd({"SET", "k", "permanent"}), &store, 1500), "+OK\r\n");
+    // Well past original TTL — key should still exist because SET removed TTL.
+    EXPECT_EQ(exec_at(make_cmd({"GET", "k"}), &store, 5000), "$9\r\npermanent\r\n");
+}
+
+TEST(Command, SetexWrongArity2Args) {
+    Store store;
+    std::string result = exec(make_cmd({"SETEX", "k"}), &store);
+    EXPECT_TRUE(result.starts_with("-ERR"));
+    EXPECT_NE(result.find("wrong number of arguments"), std::string::npos);
+}
+
+TEST(Command, SetexWrongArity3Args) {
+    Store store;
+    std::string result = exec(make_cmd({"SETEX", "k", "60"}), &store);
+    EXPECT_TRUE(result.starts_with("-ERR"));
+    EXPECT_NE(result.find("wrong number of arguments"), std::string::npos);
+}
+
+TEST(Command, SetexWrongArity5Args) {
+    Store store;
+    std::string result = exec(make_cmd({"SETEX", "k", "60", "val", "extra"}), &store);
+    EXPECT_TRUE(result.starts_with("-ERR"));
+    EXPECT_NE(result.find("wrong number of arguments"), std::string::npos);
+}
+
+TEST(Command, SetexNonNumericSeconds) {
+    Store store;
+    std::string result = exec(make_cmd({"SETEX", "k", "abc", "val"}), &store);
+    EXPECT_TRUE(result.starts_with("-ERR"));
+    EXPECT_NE(result.find("invalid expire time"), std::string::npos);
+}
+
+TEST(Command, SetexNegativeSeconds) {
+    Store store;
+    std::string result = exec(make_cmd({"SETEX", "k", "-1", "val"}), &store);
+    EXPECT_TRUE(result.starts_with("-ERR"));
+    EXPECT_NE(result.find("invalid expire time"), std::string::npos);
+}
+
+TEST(Command, SetexZeroSeconds) {
+    Store store;
+    std::string result = exec(make_cmd({"SETEX", "k", "0", "val"}), &store);
+    EXPECT_TRUE(result.starts_with("-ERR"));
+    EXPECT_NE(result.find("invalid expire time"), std::string::npos);
+}
+
+TEST(Command, SetexOverflowSeconds) {
+    Store store;
+    std::string result = exec(make_cmd({"SETEX", "k", "99999999999", "val"}), &store);
+    EXPECT_TRUE(result.starts_with("-ERR"));
+    EXPECT_NE(result.find("invalid expire time"), std::string::npos);
+}
+
+TEST(Command, SetexEmptySeconds) {
+    Store store;
+    std::string result = exec(make_cmd({"SETEX", "k", "", "val"}), &store);
+    EXPECT_TRUE(result.starts_with("-ERR"));
+    EXPECT_NE(result.find("invalid expire time"), std::string::npos);
+}
+
+TEST(Command, SetexLeadingZeroSeconds) {
+    Store store;
+    // Leading zeros are fine — treated as decimal 60.
+    EXPECT_EQ(exec(make_cmd({"SETEX", "k", "060", "val"}), &store), "+OK\r\n");
+    EXPECT_EQ(exec(make_cmd({"GET", "k"}), &store), "$3\r\nval\r\n");
+}
+
+TEST(Command, SetexMaxReasonableSeconds) {
+    Store store;
+    // INT32_MAX = 2147483647 (~68 years)
+    EXPECT_EQ(exec(make_cmd({"SETEX", "k", "2147483647", "val"}), &store), "+OK\r\n");
+    EXPECT_EQ(exec(make_cmd({"GET", "k"}), &store), "$3\r\nval\r\n");
+}
+
+TEST(Command, SetexCaseInsensitive) {
+    Store store;
+    EXPECT_EQ(exec(make_cmd({"setex", "k1", "60", "v1"}), &store), "+OK\r\n");
+    EXPECT_EQ(exec(make_cmd({"Setex", "k2", "60", "v2"}), &store), "+OK\r\n");
+    EXPECT_EQ(exec(make_cmd({"SETEX", "k3", "60", "v3"}), &store), "+OK\r\n");
+    EXPECT_EQ(exec(make_cmd({"GET", "k1"}), &store), "$2\r\nv1\r\n");
+    EXPECT_EQ(exec(make_cmd({"GET", "k2"}), &store), "$2\r\nv2\r\n");
+    EXPECT_EQ(exec(make_cmd({"GET", "k3"}), &store), "$2\r\nv3\r\n");
+}
+
+TEST(Command, SetexEmptyKey) {
+    Store store;
+    EXPECT_EQ(exec(make_cmd({"SETEX", "", "60", "val"}), &store), "+OK\r\n");
+    EXPECT_EQ(exec(make_cmd({"GET", ""}), &store), "$3\r\nval\r\n");
+}
+
+TEST(Command, SetexEmptyValue) {
+    Store store;
+    EXPECT_EQ(exec(make_cmd({"SETEX", "k", "60", ""}), &store), "+OK\r\n");
+    EXPECT_EQ(exec(make_cmd({"GET", "k"}), &store), "$0\r\n\r\n");
+}
+
+TEST(Command, SetexBinaryKeyValue) {
+    Store store;
+    uint8_t key_data[] = {'k', 0x00, 'y'};
+    uint8_t val_data[] = {'v', 0x00, '\r', '\n', 'l'};
+    const char* sec_str = "60";
+
+    RespCommand cmd = {};
+    const char* setex_str = "SETEX";
+    cmd.args[0].data = reinterpret_cast<const uint8_t*>(setex_str);
+    cmd.args[0].len = 5;
+    cmd.args[1].data = key_data;
+    cmd.args[1].len = 3;
+    cmd.args[2].data = reinterpret_cast<const uint8_t*>(sec_str);
+    cmd.args[2].len = 2;
+    cmd.args[3].data = val_data;
+    cmd.args[3].len = 5;
+    cmd.argc = 4;
+
+    uint8_t buf[4096];
+    uint32_t n = command_execute(&cmd, &store, 12345, buf, sizeof(buf));
+    EXPECT_EQ(std::string(reinterpret_cast<char*>(buf), n), "+OK\r\n");
+
+    // GET with same binary key.
+    RespCommand get_cmd = {};
+    const char* get_str = "GET";
+    get_cmd.args[0].data = reinterpret_cast<const uint8_t*>(get_str);
+    get_cmd.args[0].len = 3;
+    get_cmd.args[1].data = key_data;
+    get_cmd.args[1].len = 3;
+    get_cmd.argc = 2;
+
+    n = command_execute(&get_cmd, &store, 12345, buf, sizeof(buf));
+    std::string result(reinterpret_cast<char*>(buf), n);
+    EXPECT_TRUE(result.starts_with("$5\r\n"));
+}
+
+TEST(Command, SetexLargeValue) {
+    Store store;
+    std::string big(4000, 'Z');
+    RespCommand cmd = {};
+    const char* setex_str = "SETEX";
+    const char* key_str = "bigkey";
+    const char* sec_str = "60";
+    cmd.args[0].data = reinterpret_cast<const uint8_t*>(setex_str);
+    cmd.args[0].len = 5;
+    cmd.args[1].data = reinterpret_cast<const uint8_t*>(key_str);
+    cmd.args[1].len = 6;
+    cmd.args[2].data = reinterpret_cast<const uint8_t*>(sec_str);
+    cmd.args[2].len = 2;
+    cmd.args[3].data = reinterpret_cast<const uint8_t*>(big.data());
+    cmd.args[3].len = static_cast<uint32_t>(big.size());
+    cmd.argc = 4;
+    EXPECT_EQ(exec(cmd, &store), "+OK\r\n");
+
+    std::string get_result = exec(make_cmd({"GET", "bigkey"}), &store);
+    EXPECT_TRUE(get_result.starts_with("$4000\r\n"));
+    EXPECT_EQ(get_result.size(), 7u + 4000u + 2u);
+}
+
+TEST(Command, SetexBufferTooSmall) {
+    Store store;
+    std::string result = exec_sized(make_cmd({"SETEX", "k", "60", "v"}), &store, 3);
+    EXPECT_LE(result.size(), 3u);
+}
+
+TEST(Command, SetexOOMReturnsErr) {
+    KvStoreConfig cfg = {
+        .capacity_bytes = 128,
+        .shard_count = 1,
+        .buckets_per_shard = 16,
+        .worker_count = 1,
+    };
+    KvStore* shared = kv_store_create(&cfg);
+    ASSERT_NE(shared, nullptr);
+    ASSERT_EQ(kv_store_register_worker(shared, 0), 0);
+
+    Store store;
+    store_bind_shared(&store, shared, 0);
+
+    std::string big(256, 'x');
+    RespCommand cmd = {};
+    const char* setex_str = "SETEX";
+    const char* key = "k";
+    const char* sec = "60";
+    cmd.args[0].data = reinterpret_cast<const uint8_t*>(setex_str);
+    cmd.args[0].len = 5;
+    cmd.args[1].data = reinterpret_cast<const uint8_t*>(key);
+    cmd.args[1].len = 1;
+    cmd.args[2].data = reinterpret_cast<const uint8_t*>(sec);
+    cmd.args[2].len = 2;
+    cmd.args[3].data = reinterpret_cast<const uint8_t*>(big.data());
+    cmd.args[3].len = static_cast<uint32_t>(big.size());
+    cmd.argc = 4;
+
+    std::string out = exec(cmd, &store);
+    EXPECT_TRUE(out.starts_with("-ERR"));
+    EXPECT_NE(out.find("out of memory"), std::string::npos);
+
+    kv_store_destroy(shared);
+}
+
+TEST(Command, SetexOneSecond) {
+    Store store;
+    EXPECT_EQ(exec_at(make_cmd({"SETEX", "k", "1", "val"}), &store, 1000), "+OK\r\n");
+    EXPECT_EQ(exec_at(make_cmd({"GET", "k"}), &store, 1999), "$3\r\nval\r\n");
+}
+
+TEST(Command, SetexPipelinedWithGet) {
+    Store store;
+    // Execute SETEX then immediately GET in sequence.
+    EXPECT_EQ(exec(make_cmd({"SETEX", "k", "60", "pipelined"}), &store), "+OK\r\n");
+    EXPECT_EQ(exec(make_cmd({"GET", "k"}), &store), "$9\r\npipelined\r\n");
 }

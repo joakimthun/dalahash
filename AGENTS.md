@@ -12,6 +12,7 @@
 Redis mode:
 - GET
 - SET
+- SETEX
 - PING
 - COMMAND (stub used by redis-cli handshake; returns `*0\r\n`)
 

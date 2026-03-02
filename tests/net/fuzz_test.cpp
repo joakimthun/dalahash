@@ -1020,4 +1020,86 @@ TEST_F(FuzzTest, InputBufFullReassembly) {
     assert_server_healthy();
 }
 
+TEST_F(FuzzTest, SetexMalformedSeconds) {
+    // Send SETEX with various malformed seconds fields; server must stay alive.
+    std::vector<std::string> payloads = {
+        make_resp_array({"SETEX", "k", "", "v"}),
+        make_resp_array({"SETEX", "k", "-1", "v"}),
+        make_resp_array({"SETEX", "k", "abc", "v"}),
+        make_resp_array({"SETEX", "k", "0", "v"}),
+        make_resp_array({"SETEX", "k", "99999999999999", "v"}),
+    };
+
+    // Also add some random-byte seconds fields
+    for (int i = 0; i < 10; i++) {
+        size_t len = static_cast<size_t>(rng_.range(1, 32));
+        std::string sec(len, '\0');
+        for (size_t j = 0; j < len; j++)
+            sec[j] = static_cast<char>(rng_.next() & 0xFF);
+        payloads.push_back(make_resp_array({"SETEX", "k", sec, "v"}));
+    }
+
+    // Send all payloads on a single connection to avoid per-payload SO_RCVTIMEO waits.
+    // The server returns -ERR for each malformed SETEX but keeps the connection open.
+    std::string combined;
+    for (const auto& payload : payloads)
+        combined += payload;
+
+    int fd = connect_loopback(port());
+    ASSERT_GE(fd, 0);
+    set_socket_timeouts(fd, 2);
+    (void)send_all(fd, combined.data(), combined.size());
+    std::string resp;
+    drain_socket(fd, resp);
+    close(fd);
+
+    assert_server_healthy();
+}
+
+TEST_F(FuzzTest, SetexBinaryValues) {
+    // SETEX with binary keys/values containing null bytes and \r\n.
+    std::string bin_key;
+    bin_key.push_back('\0');
+    bin_key += "setex\r\nkey";
+    bin_key.push_back('\x01');
+
+    std::string bin_value;
+    bin_value.push_back('\0');
+    bin_value += "setex\r\nval";
+    bin_value.push_back('\x7f');
+    bin_value.push_back('\0');
+
+    std::string set_cmd = make_resp_array({"SETEX", bin_key, "60", bin_value});
+    std::string get_cmd = make_resp_array({"GET", bin_key});
+
+    int fd = connect_loopback(port());
+    ASSERT_GE(fd, 0);
+    set_socket_timeouts(fd, 2);
+
+    std::string pipeline = set_cmd + get_cmd;
+    ASSERT_TRUE(send_all(fd, pipeline.data(), pipeline.size()));
+
+    std::string resp;
+    char buf[4096];
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        ssize_t n = recv_with_timeout(fd, buf, sizeof(buf));
+        if (n <= 0)
+            break;
+        resp.append(buf, static_cast<size_t>(n));
+        std::string expected_get_prefix = "$" + std::to_string(bin_value.size()) + "\r\n";
+        if (resp.find(expected_get_prefix) != std::string::npos &&
+            resp.size() >= 5 + expected_get_prefix.size() + bin_value.size() + 2)
+            break;
+    }
+    close(fd);
+
+    ASSERT_TRUE(resp.starts_with("+OK\r\n")) << "SETEX response: " << resp.substr(0, 20);
+
+    std::string expected_get = "$" + std::to_string(bin_value.size()) + "\r\n" + bin_value + "\r\n";
+    EXPECT_NE(resp.find(expected_get), std::string::npos) << "Binary SETEX value round-trip failed";
+
+    assert_server_healthy();
+}
+
 } // namespace

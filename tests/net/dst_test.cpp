@@ -1758,3 +1758,50 @@ TEST(DSTIntegration, OverflowDrainRepeatedENOSPC) {
     // Must have retried at least 3 times per fd on average.
     EXPECT_GE(sim.submit_close_call_count, 600);
 }
+
+// --- SETEX DST unit tests ---
+
+TEST(DST, SetexThenGet) {
+    ProtocolWorkerState state = {};
+    protocol_worker_init(&state);
+    Connection* conn = connection_create(10);
+    std::string setex_data = "*4\r\n$5\r\nSETEX\r\n$3\r\nfoo\r\n$2\r\n60\r\n$3\r\nbar\r\n";
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t*>(setex_data.data()),
+                           static_cast<uint32_t>(setex_data.size()), &state),
+              "+OK\r\n");
+    std::string get_data = "*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n";
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t*>(get_data.data()),
+                           static_cast<uint32_t>(get_data.size()), &state),
+              "$3\r\nbar\r\n");
+    connection_destroy(conn);
+}
+
+// --- SETEX DSTIntegration tests ---
+
+TEST(DSTIntegration, SetexThenGetViaWorkerRun) {
+    SimIoBackend sim_setup;
+    std::string setex_cmd = "*4\r\n$5\r\nSETEX\r\n$3\r\nfoo\r\n$2\r\n60\r\n$3\r\nbar\r\n";
+    std::string get_cmd = "*2\r\n$3\r\nGET\r\n$3\r\nfoo\r\n";
+    std::string pipeline = setex_cmd + get_cmd;
+    std::vector<IoCompletion> events;
+    events.push_back(sim_accept(10));
+    events.push_back(sim_recv(&sim_setup, 10, pipeline.data(), static_cast<uint32_t>(pipeline.size())));
+
+    SimIoBackend result = run_worker_sim(events);
+    EXPECT_EQ(result.sent_data[10], "+OK\r\n$3\r\nbar\r\n");
+}
+
+TEST(DSTIntegration, SetexPipelinedViaWorkerRun) {
+    SimIoBackend sim_setup;
+    std::string setex1 = "*4\r\n$5\r\nSETEX\r\n$2\r\nk1\r\n$2\r\n60\r\n$2\r\nv1\r\n";
+    std::string setex2 = "*4\r\n$5\r\nSETEX\r\n$2\r\nk2\r\n$2\r\n60\r\n$2\r\nv2\r\n";
+    std::string get1 = "*2\r\n$3\r\nGET\r\n$2\r\nk1\r\n";
+    std::string get2 = "*2\r\n$3\r\nGET\r\n$2\r\nk2\r\n";
+    std::string pipeline = setex1 + setex2 + get1 + get2;
+    std::vector<IoCompletion> events;
+    events.push_back(sim_accept(10));
+    events.push_back(sim_recv(&sim_setup, 10, pipeline.data(), static_cast<uint32_t>(pipeline.size())));
+
+    SimIoBackend result = run_worker_sim(events);
+    EXPECT_EQ(result.sent_data[10], "+OK\r\n+OK\r\n$2\r\nv1\r\n$2\r\nv2\r\n");
+}

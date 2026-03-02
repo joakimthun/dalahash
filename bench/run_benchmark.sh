@@ -17,6 +17,7 @@ PERCENTILES="50,90,99,99.9,99.99"
 OUTPUT_DIR="bench/results"
 DISTINCT_CLIENT_SEED=""
 BINARY=""
+SETEX_MODE=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -40,6 +41,7 @@ Options:
   --percentiles P    Latency percentiles to report    (default: $PERCENTILES)
   --output-dir DIR   Where to save results            (default: $OUTPUT_DIR)
   --distinct-client-seed  Use a different random seed per client (memtier flag)
+  --setex              Run additional SETEX-only benchmark pass
   --binary PATH      Path to pre-built dalahash binary (default: auto-build Release)
   -h, --help         Show this help
 EOF
@@ -71,6 +73,7 @@ while [[ $# -gt 0 ]]; do
         --percentiles) require_arg "$@"; PERCENTILES="$2"; shift 2 ;;
         --output-dir) require_arg "$@"; OUTPUT_DIR="$2"; shift 2 ;;
         --distinct-client-seed) DISTINCT_CLIENT_SEED=1; shift ;;
+        --setex)      SETEX_MODE=1; shift ;;
         --binary)     require_arg "$@"; BINARY="$2";     shift 2 ;;
         -h|--help)    usage; exit 0 ;;
         *)            echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
@@ -227,6 +230,30 @@ memtier_benchmark \
     --hdr-file-prefix="$RUN_DIR/hdr" \
     ${MEMTIER_EXTRA[@]+"${MEMTIER_EXTRA[@]}"} \
     2>&1 | tee "$RUN_DIR/summary.txt"
+
+# ── Optional SETEX benchmark ─────────────────────────────────────────────────
+if [[ -n "$SETEX_MODE" ]]; then
+    echo ""
+    echo "==> Running SETEX benchmark: ${DURATION}s, pipeline=$PIPELINE,"
+    echo "    ${THREADS}t × ${CLIENTS}c = $((THREADS * CLIENTS)) connections"
+    echo ""
+
+    memtier_benchmark \
+        -s 127.0.0.1 -p "$PORT" \
+        --protocol=redis \
+        --threads="$THREADS" --clients="$CLIENTS" \
+        --command="SETEX __key__ 60 __data__" \
+        --command-key-pattern=R \
+        --key-minimum=1 --key-maximum="$KEY_MAX" \
+        --test-time="$DURATION" \
+        --data-size="$DATA_SIZE" \
+        --pipeline="$PIPELINE" \
+        --print-percentiles="$PERCENTILES" \
+        --json-out-file="$RUN_DIR/setex_results.json" \
+        --hdr-file-prefix="$RUN_DIR/setex_hdr" \
+        ${MEMTIER_EXTRA[@]+"${MEMTIER_EXTRA[@]}"} \
+        2>&1 | tee "$RUN_DIR/setex_summary.txt"
+fi
 
 echo ""
 echo "==> Results saved to $RUN_DIR/"

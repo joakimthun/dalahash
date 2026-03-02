@@ -106,6 +106,40 @@ uint32_t command_execute(const RespCommand* cmd, Store* store, uint64_t now_ms, 
         return resp_write_ok(out_buf);
     }
 
+    if (arg_matches(verb, "SETEX", 5)) {
+        if (cmd->argc != 4)
+            return write_error_bounded(out_buf, out_buf_size,
+                                       "wrong number of arguments for 'setex' command");
+        // Parse seconds: manual ASCII-to-uint64, reject non-digits/empty/overflow.
+        const RespArg* sec_arg = &cmd->args[2];
+        if (sec_arg->len == 0)
+            return write_error_bounded(out_buf, out_buf_size, "invalid expire time in 'setex' command");
+        uint64_t seconds = 0;
+        for (uint32_t i = 0; i < sec_arg->len; i++) {
+            uint8_t ch = sec_arg->data[i];
+            if (ch < '0' || ch > '9')
+                return write_error_bounded(out_buf, out_buf_size, "invalid expire time in 'setex' command");
+            uint64_t prev = seconds;
+            seconds = seconds * 10 + (ch - '0');
+            // Overflow or exceeds UINT32_MAX (136+ years, matches Redis)
+            if (seconds < prev || seconds > UINT32_MAX)
+                return write_error_bounded(out_buf, out_buf_size, "invalid expire time in 'setex' command");
+        }
+        if (seconds == 0)
+            return write_error_bounded(out_buf, out_buf_size, "invalid expire time in 'setex' command");
+        uint64_t ttl_ms = seconds * 1000ULL;
+        std::string_view key(reinterpret_cast<const char*>(cmd->args[1].data), cmd->args[1].len);
+        std::string_view value(reinterpret_cast<const char*>(cmd->args[3].data), cmd->args[3].len);
+        StoreSetStatus set_status = store_set_expire_after_ms_at(store, key, value, ttl_ms, now_ms);
+        if (set_status == StoreSetStatus::OOM)
+            return write_error_bounded(out_buf, out_buf_size, "out of memory");
+        if (set_status != StoreSetStatus::OK)
+            return write_error_bounded(out_buf, out_buf_size, "store failure");
+        if (out_buf_size < 5)
+            return write_error_bounded(out_buf, out_buf_size, "output buffer too small");
+        return resp_write_ok(out_buf);
+    }
+
     if (arg_matches(verb, "PING", 4)) {
         if (out_buf_size < 7)
             return write_error_bounded(out_buf, out_buf_size, "output buffer too small");

@@ -1,4 +1,6 @@
+#include "redis/command.h"
 #include "redis/resp.h"
+#include "redis/store.h"
 
 #include <benchmark/benchmark.h>
 
@@ -289,11 +291,125 @@ static void BM_RespParseMixedPipeline(benchmark::State& state) {
                            benchmark::Counter::kIsRate);
 }
 
+static std::string make_setex_command(uint32_t key_len, uint32_t seconds, uint32_t value_len) {
+    const std::string key = make_ascii_payload(key_len, 13);
+    const std::string sec = std::to_string(seconds);
+    const std::string value = make_ascii_payload(value_len, 17);
+    std::string cmd;
+    cmd.reserve(64u + key.size() + sec.size() + value.size());
+    cmd.append("*4\r\n");
+    append_bulk(&cmd, "SETEX", 5);
+    append_bulk(&cmd, key.data(), static_cast<uint32_t>(key.size()));
+    append_bulk(&cmd, sec.data(), static_cast<uint32_t>(sec.size()));
+    append_bulk(&cmd, value.data(), static_cast<uint32_t>(value.size()));
+    return cmd;
+}
+
+static void BM_RespParseSetex(benchmark::State& state) {
+    if (state.range(0) < 0 || state.range(1) < 0) {
+        state.SkipWithError("invalid SETEX lengths");
+        return;
+    }
+    const uint32_t key_len = static_cast<uint32_t>(state.range(0));
+    const uint32_t value_len = static_cast<uint32_t>(state.range(1));
+    const std::string cmd_bytes = make_setex_command(key_len, 60, value_len);
+    const uint8_t* input = reinterpret_cast<const uint8_t*>(cmd_bytes.data());
+    const uint32_t input_len = static_cast<uint32_t>(cmd_bytes.size());
+
+    RespCommand cmd = {};
+    uint32_t consumed = 0;
+    for (auto _ : state) {
+        (void)_;
+        const RespParseResult result = resp_parse(input, input_len, &cmd, &consumed);
+        if (result != RespParseResult::OK || consumed != input_len) {
+            state.SkipWithError("resp_parse failed for SETEX");
+            break;
+        }
+        benchmark::DoNotOptimize(cmd.argc);
+        benchmark::DoNotOptimize(cmd.args[3].data);
+        benchmark::DoNotOptimize(consumed);
+    }
+
+    state.SetItemsProcessed(static_cast<int64_t>(state.iterations()));
+    state.SetBytesProcessed(state.iterations() * static_cast<int64_t>(input_len));
+}
+
+static RespCommand make_resp_cmd(std::initializer_list<std::pair<const char*, uint32_t>> args) {
+    RespCommand cmd = {};
+    int i = 0;
+    for (auto [data, len] : args) {
+        cmd.args[i].data = reinterpret_cast<const uint8_t*>(data);
+        cmd.args[i].len = len;
+        i++;
+    }
+    cmd.argc = i;
+    return cmd;
+}
+
+static void BM_CommandExecuteSet(benchmark::State& state) {
+    if (state.range(0) < 0 || state.range(1) < 0) {
+        state.SkipWithError("invalid SET lengths");
+        return;
+    }
+    const uint32_t key_len = static_cast<uint32_t>(state.range(0));
+    const uint32_t value_len = static_cast<uint32_t>(state.range(1));
+    const std::string key = make_ascii_payload(key_len, 7);
+    const std::string value = make_ascii_payload(value_len, 11);
+
+    RespCommand cmd = make_resp_cmd({{"SET", 3}, {key.data(), key_len}, {value.data(), value_len}});
+
+    Store store;
+    uint8_t out_buf[256];
+
+    for (auto _ : state) {
+        (void)_;
+        uint32_t n = command_execute(&cmd, &store, 12345, out_buf, sizeof(out_buf));
+        benchmark::DoNotOptimize(n);
+        benchmark::DoNotOptimize(out_buf);
+        benchmark::ClobberMemory();
+    }
+
+    state.SetItemsProcessed(static_cast<int64_t>(state.iterations()));
+}
+
+static void BM_CommandExecuteSetex(benchmark::State& state) {
+    if (state.range(0) < 0 || state.range(1) < 0) {
+        state.SkipWithError("invalid SETEX lengths");
+        return;
+    }
+    const uint32_t key_len = static_cast<uint32_t>(state.range(0));
+    const uint32_t value_len = static_cast<uint32_t>(state.range(1));
+    const std::string key = make_ascii_payload(key_len, 13);
+    const std::string sec = "60";
+    const std::string value = make_ascii_payload(value_len, 17);
+
+    RespCommand cmd = make_resp_cmd({{"SETEX", 5},
+                                     {key.data(), key_len},
+                                     {sec.data(), static_cast<uint32_t>(sec.size())},
+                                     {value.data(), value_len}});
+
+    Store store;
+    uint8_t out_buf[256];
+
+    for (auto _ : state) {
+        (void)_;
+        uint32_t n = command_execute(&cmd, &store, 12345, out_buf, sizeof(out_buf));
+        benchmark::DoNotOptimize(n);
+        benchmark::DoNotOptimize(out_buf);
+        benchmark::ClobberMemory();
+    }
+
+    state.SetItemsProcessed(static_cast<int64_t>(state.iterations()));
+}
+
 BENCHMARK(BM_RespParseGet)->Apply(add_get_args)->Unit(benchmark::kNanosecond);
 BENCHMARK(BM_RespParseSet)->Apply(add_set_args)->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_RespParseSetex)->Apply(add_set_args)->Unit(benchmark::kNanosecond);
 BENCHMARK(BM_RespWriteBulk)->Apply(add_write_bulk_args)->Unit(benchmark::kNanosecond);
 BENCHMARK(BM_RespParsePipeline)->Apply(add_pipeline_args)->Unit(benchmark::kNanosecond);
 BENCHMARK(BM_RespParseMixedPipeline)->Apply(add_mixed_pipeline_args)->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_CommandExecuteSet)->Apply(add_set_args)->Unit(benchmark::kNanosecond);
+BENCHMARK(BM_CommandExecuteSetex)->Apply(add_set_args)->Unit(benchmark::kNanosecond);
 
 } // namespace
 

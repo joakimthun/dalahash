@@ -350,4 +350,28 @@ TEST_F(IoUringIntegrationTest, ErrorResponsesSurfaceToClient) {
     EXPECT_EQ(trim_trailing_line_endings(unknown.output), "ERR unknown command");
 }
 
+TEST_F(IoUringIntegrationTest, SetexThenGetRoundTrip) {
+    CommandResult set = client().command({"SETEX", "setex:key", "60", "value456"});
+    ASSERT_EQ(set.exit_code, 0) << set.output;
+    EXPECT_EQ(trim_trailing_line_endings(set.output), "OK");
+
+    CommandResult get = client().command({"GET", "setex:key"});
+    ASSERT_EQ(get.exit_code, 0) << get.output;
+    EXPECT_EQ(trim_trailing_line_endings(get.output), "value456");
+}
+
+TEST_F(IoUringIntegrationTest, SetexErrorResponses) {
+    // Wrong arity
+    CommandResult arity = client().command({"SETEX", "k"});
+    ASSERT_EQ(arity.exit_code, 0) << arity.output;
+    EXPECT_TRUE(trim_trailing_line_endings(arity.output)
+                    .starts_with("ERR wrong number of arguments for 'setex' command"));
+
+    // Non-numeric seconds
+    CommandResult bad_sec = client().command({"SETEX", "k", "abc", "v"});
+    ASSERT_EQ(bad_sec.exit_code, 0) << bad_sec.output;
+    EXPECT_TRUE(
+        trim_trailing_line_endings(bad_sec.output).starts_with("ERR invalid expire time in 'setex' command"));
+}
+
 } // namespace
