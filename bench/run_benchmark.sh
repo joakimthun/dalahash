@@ -18,6 +18,7 @@ OUTPUT_DIR="bench/results"
 DISTINCT_CLIENT_SEED=""
 BINARY=""
 SETEX_MODE=""
+MEMCACHED_MODE=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -42,6 +43,7 @@ Options:
   --output-dir DIR   Where to save results            (default: $OUTPUT_DIR)
   --distinct-client-seed  Use a different random seed per client (memtier flag)
   --setex              Run additional SETEX-only benchmark pass
+  --memcached          Use memcached protocol (builds with -DDALAHASH_PROTOCOL=memcached)
   --binary PATH      Path to pre-built dalahash binary (default: auto-build Release)
   -h, --help         Show this help
 EOF
@@ -74,6 +76,7 @@ while [[ $# -gt 0 ]]; do
         --output-dir) require_arg "$@"; OUTPUT_DIR="$2"; shift 2 ;;
         --distinct-client-seed) DISTINCT_CLIENT_SEED=1; shift ;;
         --setex)      SETEX_MODE=1; shift ;;
+        --memcached)  MEMCACHED_MODE=1; shift ;;
         --binary)     require_arg "$@"; BINARY="$2";     shift 2 ;;
         -h|--help)    usage; exit 0 ;;
         *)            echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
@@ -89,20 +92,27 @@ check_command() {
 
 check_command memtier_benchmark \
     "Install: sudo apt install memtier  OR  see https://github.com/RedisLabs/memtier_benchmark"
-check_command redis-cli \
-    "Install: sudo apt install redis-tools"
+if [[ -z "$MEMCACHED_MODE" ]]; then
+    check_command redis-cli \
+        "Install: sudo apt install redis-tools"
+fi
 
 # ── Build if no binary provided ──────────────────────────────────────────────
 # Pin Redis protocol, Release mode, no sanitizers. Uses a fresh build dir to
 # guarantee no stale cache state leaks in from prior configurations.
 if [[ -z "$BINARY" ]]; then
+    if [[ -n "$MEMCACHED_MODE" ]]; then
+        BENCH_PROTOCOL="memcached"
+    else
+        BENCH_PROTOCOL="redis"
+    fi
     BUILD_DIR="$PROJECT_DIR/build-release-bench"
-    echo "==> Building dalahash (Release, Redis protocol) in $BUILD_DIR ..."
+    echo "==> Building dalahash (Release, ${BENCH_PROTOCOL} protocol) in $BUILD_DIR ..."
     cmake -B "$BUILD_DIR" \
         -DCMAKE_C_COMPILER=clang-21 \
         -DCMAKE_CXX_COMPILER=clang++-21 \
         -DCMAKE_BUILD_TYPE=Release \
-        -DDALAHASH_PROTOCOL=redis \
+        -DDALAHASH_PROTOCOL="$BENCH_PROTOCOL" \
         -DENABLE_ASAN=OFF \
         -DENABLE_LSAN=OFF \
         -DENABLE_BENCHMARKS=OFF \
@@ -116,20 +126,25 @@ if [[ ! -x "$BINARY" ]]; then
     die "binary not found or not executable: $BINARY"
 fi
 
-# ── Validate that the binary speaks Redis protocol ───────────────────────────
-# The binary embeds the protocol as a compile-time define. We verify by checking
-# for the DALAHASH_PROTOCOL_REDIS symbol in the binary, or fall back to a
-# runtime PING check after startup.
-validate_redis_protocol() {
-    # Quick check: does the binary contain the Redis RESP "+PONG" response literal?
-    if strings "$BINARY" 2>/dev/null | grep -q '+PONG'; then
-        return 0
-    fi
-    echo "WARNING: could not confirm binary is built with Redis protocol." >&2
-    echo "    Benchmark assumes Redis mode. If the server fails to respond," >&2
-    echo "    rebuild with: -DDALAHASH_PROTOCOL=redis" >&2
-}
-validate_redis_protocol
+# ── Validate that the binary speaks the expected protocol ──────────────────
+if [[ -n "$MEMCACHED_MODE" ]]; then
+    validate_protocol() {
+        if strings "$BINARY" 2>/dev/null | grep -q 'dalahash-1.0'; then
+            return 0
+        fi
+        echo "WARNING: could not confirm binary is built with memcached protocol." >&2
+        echo "    Rebuild with: -DDALAHASH_PROTOCOL=memcached" >&2
+    }
+else
+    validate_protocol() {
+        if strings "$BINARY" 2>/dev/null | grep -q '+PONG'; then
+            return 0
+        fi
+        echo "WARNING: could not confirm binary is built with Redis protocol." >&2
+        echo "    Rebuild with: -DDALAHASH_PROTOCOL=redis" >&2
+    }
+fi
+validate_protocol
 
 # ── Prepare output directory ─────────────────────────────────────────────────
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
@@ -159,13 +174,20 @@ for i in $(seq 1 50); do
         wait "$SERVER_PID" 2>/dev/null || true
         die "dalahash exited immediately (PID $SERVER_PID). Check binary, port, or environment."
     fi
-    if redis-cli -h 127.0.0.1 -p "$PORT" PING 2>/dev/null | grep -q PONG; then
-        echo " ready."
-        break
+    if [[ -n "$MEMCACHED_MODE" ]]; then
+        if printf "version\r\n" | nc -q 1 127.0.0.1 "$PORT" 2>/dev/null | grep -q VERSION; then
+            echo " ready."
+            break
+        fi
+    else
+        if redis-cli -h 127.0.0.1 -p "$PORT" PING 2>/dev/null | grep -q PONG; then
+            echo " ready."
+            break
+        fi
     fi
     if [[ $i -eq 50 ]]; then
         echo ""
-        die "server did not respond to PING after 5s. Is this a Redis-protocol binary?"
+        die "server did not respond after 5s. Check binary and protocol."
     fi
     echo -n "."
     sleep 0.1
@@ -185,6 +207,7 @@ data_size:    ${DATA_SIZE}B
 key_max:      $KEY_MAX
 pipeline:     $PIPELINE
 distinct_client_seed: ${DISTINCT_CLIENT_SEED:-0}
+protocol:     ${MEMCACHED_MODE:+memcached}${MEMCACHED_MODE:-redis}
 EOF
 
 # ── Build optional memtier flags ──────────────────────────────────────────────
@@ -193,11 +216,18 @@ if [[ -n "$DISTINCT_CLIENT_SEED" ]]; then
     MEMTIER_EXTRA+=(--distinct-client-seed)
 fi
 
+# ── Select memtier protocol flag ──────────────────────────────────────────────
+if [[ -n "$MEMCACHED_MODE" ]]; then
+    MEMTIER_PROTO="memcache_text"
+else
+    MEMTIER_PROTO="redis"
+fi
+
 # ── Pre-seed keys ────────────────────────────────────────────────────────────
 echo "==> Pre-seeding $KEY_MAX keys (${DATA_SIZE}B values) ..."
 memtier_benchmark \
     -s 127.0.0.1 -p "$PORT" \
-    --protocol=redis \
+    --protocol="$MEMTIER_PROTO" \
     --threads=2 --clients=10 \
     --ratio=1:0 \
     --key-minimum=1 --key-maximum="$KEY_MAX" \
@@ -217,7 +247,7 @@ echo ""
 
 memtier_benchmark \
     -s 127.0.0.1 -p "$PORT" \
-    --protocol=redis \
+    --protocol="$MEMTIER_PROTO" \
     --threads="$THREADS" --clients="$CLIENTS" \
     --ratio="$RATIO" \
     --key-minimum=1 --key-maximum="$KEY_MAX" \
@@ -231,8 +261,8 @@ memtier_benchmark \
     ${MEMTIER_EXTRA[@]+"${MEMTIER_EXTRA[@]}"} \
     2>&1 | tee "$RUN_DIR/summary.txt"
 
-# ── Optional SETEX benchmark ─────────────────────────────────────────────────
-if [[ -n "$SETEX_MODE" ]]; then
+# ── Optional SETEX benchmark (Redis mode only) ──────────────────────────────
+if [[ -n "$SETEX_MODE" && -z "$MEMCACHED_MODE" ]]; then
     echo ""
     echo "==> Running SETEX benchmark: ${DURATION}s, pipeline=$PIPELINE,"
     echo "    ${THREADS}t × ${CLIENTS}c = $((THREADS * CLIENTS)) connections"

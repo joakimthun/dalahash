@@ -13,6 +13,8 @@ build-asan/
 build_asan/
 build-perf/
 build_perf/
+build-mc/
+build_mc/
 bench/results/
 *.local.json
 notes.txt

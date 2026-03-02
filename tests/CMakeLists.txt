@@ -10,7 +10,7 @@ FetchContent_Declare(
 # Make gtest targets (GTest::gtest_main, etc.) available
 FetchContent_MakeAvailable(googletest)
 
-# Unit tests — RESP parser, command dispatch, smoke test
+# Unit tests — RESP parser, command dispatch, memcached parser/command, smoke test
 add_executable(dalahash_tests
     base/assert_test.cpp
     smoke_test.cpp
@@ -20,6 +20,8 @@ add_executable(dalahash_tests
     kv/shared_kv_store_stress_test.cpp
     redis/resp_test.cpp
     redis/command_test.cpp
+    memcached/memcached_parse_test.cpp
+    memcached/memcached_command_test.cpp
 )
 # GTest::gtest_main provides main() so test files only need TEST() macros
 target_link_libraries(dalahash_tests dalahash_lib GTest::gtest_main)
@@ -73,6 +75,34 @@ elseif(DALAHASH_PROTOCOL STREQUAL "echo")
     target_compile_definitions(echo_integration_tests PRIVATE
         DALAHASH_BINARY_PATH="$<TARGET_FILE:dalahash>"
     )
+elseif(DALAHASH_PROTOCOL STREQUAL "memcached")
+    # DST tests — deterministic simulation for memcached protocol
+    add_executable(dst_memcached_tests
+        net/dst_memcached_test.cpp
+    )
+    target_include_directories(dst_memcached_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/net
+        ${CMAKE_SOURCE_DIR}/src/net
+    )
+    target_link_libraries(dst_memcached_tests dalahash_lib GTest::gtest_main)
+
+    # Real I/O integration tests — raw TCP memcached behavior
+    add_executable(memcached_integration_tests
+        net/memcached_integration_test.cpp
+    )
+    target_link_libraries(memcached_integration_tests GTest::gtest_main)
+    target_compile_definitions(memcached_integration_tests PRIVATE
+        DALAHASH_BINARY_PATH="$<TARGET_FILE:dalahash>"
+    )
+
+    # Fuzz tests — real server, raw TCP, malformed/random input
+    add_executable(memcached_fuzz_tests
+        net/memcached_fuzz_test.cpp
+    )
+    target_link_libraries(memcached_fuzz_tests GTest::gtest_main)
+    target_compile_definitions(memcached_fuzz_tests PRIVATE
+        DALAHASH_BINARY_PATH="$<TARGET_FILE:dalahash>"
+    )
 endif()
 
 # GoogleTest integration — auto-discovers TEST() macros and registers them with CTest
@@ -92,4 +122,13 @@ if(TARGET echo_integration_tests)
 endif()
 if(TARGET fuzz_tests)
     gtest_discover_tests(fuzz_tests DISCOVERY_MODE PRE_TEST)
+endif()
+if(TARGET dst_memcached_tests)
+    gtest_discover_tests(dst_memcached_tests DISCOVERY_MODE PRE_TEST)
+endif()
+if(TARGET memcached_integration_tests)
+    gtest_discover_tests(memcached_integration_tests DISCOVERY_MODE PRE_TEST)
+endif()
+if(TARGET memcached_fuzz_tests)
+    gtest_discover_tests(memcached_fuzz_tests DISCOVERY_MODE PRE_TEST)
 endif()

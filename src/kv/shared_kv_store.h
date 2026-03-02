@@ -20,6 +20,15 @@ enum class KvGetStatus : uint8_t {
     HIT = 1,
 };
 
+enum class KvDeleteStatus : uint8_t {
+    // Key found and removed.
+    OK = 0,
+    // Key not found or already expired.
+    NOT_FOUND = 1,
+    // Invalid API usage (e.g. null store pointer, unregistered worker).
+    INVALID = 2,
+};
+
 enum class KvSetStatus : uint8_t {
     // Insert/overwrite completed.
     OK = 0,
@@ -145,6 +154,18 @@ KvGetStatus kv_store_get(KvStore* store, uint32_t worker_id, std::string_view ke
 //   - INVALID is returned for out-of-range or unregistered worker ids.
 KvSetStatus kv_store_set(KvStore* store, uint32_t worker_id, std::string_view key, std::string_view value,
                          uint64_t now_ms, const KvSetOptions* opts);
+
+// Delete a key.
+//
+// Parameters:
+//   - worker_id: worker index used for retirement ownership.
+//                Must be registered via kv_store_register_worker.
+//   - now_ms: caller-provided current time in milliseconds (used for expiration check).
+//
+// Thread-safety:
+//   - Safe for concurrent calls from many threads when each thread uses a
+//     stable registered worker_id.
+KvDeleteStatus kv_store_delete(KvStore* store, uint32_t worker_id, std::string_view key, uint64_t now_ms);
 
 // Return current accounted bytes for active slot-resident nodes.
 //

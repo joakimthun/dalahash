@@ -103,6 +103,8 @@ struct ProtocolInitContext {
 #include "protocol/redis/redis_protocol.h"
 #elif defined(DALAHASH_PROTOCOL_ECHO) && DALAHASH_PROTOCOL_ECHO
 #include "protocol/echo/echo_protocol.h"
+#elif defined(DALAHASH_PROTOCOL_MEMCACHED) && DALAHASH_PROTOCOL_MEMCACHED
+#include "protocol/memcached/memcached_protocol.h"
 #else
-#error "No protocol selected. Set DALAHASH_PROTOCOL (redis/echo) in CMake."
+#error "No protocol selected. Set DALAHASH_PROTOCOL (redis/echo/memcached) in CMake."
 #endif

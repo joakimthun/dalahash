@@ -16,6 +16,12 @@ Redis mode:
 - PING
 - COMMAND (stub used by redis-cli handshake; returns `*0\r\n`)
 
+Memcached mode (text protocol):
+- Legacy: get, set, delete, version
+- Meta: mg (meta get), ms (meta set), md (meta delete)
+- Client flags preserved via 4-byte big-endian value prefix
+- noreply/quiet mode support
+
 Echo mode:
 - Raw TCP echo (server writes back the exact bytes received).
 
@@ -66,6 +72,7 @@ cmake --build build -j$(nproc)
 
 Protocol selection is compile-time via CMake cache var:
 - `-DDALAHASH_PROTOCOL=redis` (default)
+- `-DDALAHASH_PROTOCOL=memcached`
 - `-DDALAHASH_PROTOCOL=echo`
 
 ## Formatting
@@ -171,6 +178,18 @@ ctest --test-dir build --output-on-failure -R '^IoUringIntegrationTest\.'
 # Real echo integration tests (echo protocol build)
 ctest --test-dir build --output-on-failure -R '^EchoIntegrationTest\.'
 
+# Memcached parser + command unit tests
+ctest --test-dir build --output-on-failure -R '^(McParse|McCommand)\.'
+
+# DST memcached tests (memcached protocol build)
+ctest --test-dir build --output-on-failure -R '^DSTMemcached\.'
+
+# Real memcached integration tests (memcached protocol build)
+ctest --test-dir build --output-on-failure -R '^MemcachedIntegration\.'
+
+# Memcached fuzz tests (memcached protocol build)
+ctest --test-dir build --output-on-failure -R '^MemcachedFuzz\.'
+
 # Single test example
 ctest --test-dir build --output-on-failure -R '^DSTIntegration\.SendFailClosesConnection$'
 ```
@@ -178,7 +197,7 @@ ctest --test-dir build --output-on-failure -R '^DSTIntegration\.SendFailClosesCo
 ### Run test binaries directly
 
 ```bash
-# Unit tests (smoke, RESP, command)
+# Unit tests (smoke, RESP, command, memcached parser/command)
 ./build/tests/dalahash_tests
 
 # DST tests (unit + integration against SimIoBackend)
@@ -189,6 +208,15 @@ ctest --test-dir build --output-on-failure -R '^DSTIntegration\.SendFailClosesCo
 
 # Echo integration tests (echo protocol build)
 ./build/tests/echo_integration_tests
+
+# DST memcached tests (memcached protocol build)
+./build/tests/dst_memcached_tests
+
+# Memcached integration tests (memcached protocol build)
+./build/tests/memcached_integration_tests
+
+# Memcached fuzz tests (memcached protocol build)
+./build/tests/memcached_fuzz_tests
 
 # Example gtest filter
 ./build/tests/dst_tests --gtest_filter='DSTIntegration.*'
@@ -284,6 +312,7 @@ Simulation backend: `tests/net/sim_io_backend.h`.
 - Selection is compile-time via `DALAHASH_PROTOCOL_*` defines from CMake.
 - Supported selections:
   - `DALAHASH_PROTOCOL_REDIS=1`
+  - `DALAHASH_PROTOCOL_MEMCACHED=1`
   - `DALAHASH_PROTOCOL_ECHO=1`
 - Worker hot path calls protocol adapter functions:
   - `protocol_parse(...)`
@@ -361,12 +390,22 @@ Only `-ENOSPC` is retried; other close submission errors destroy connection stat
 | `src/protocol/echo/echo_protocol.h` | Echo protocol adapter used by the generic worker |
 | `src/redis/resp.h/.cpp` | RESP2 parser and response formatters |
 | `src/redis/command.h/.cpp` | Command dispatch (GET, SET, PING, COMMAND stub) |
-| `src/redis/store.h` | Per-thread key-value store (`std::unordered_map`) |
+| `src/store/store.h` | Shared Store wrapper with get/set/delete helpers |
+| `src/redis/store.h` | Thin redirect to `src/store/store.h` |
+| `src/protocol/memcached/memcached_protocol.h` | Memcached protocol adapter used by the generic worker |
+| `src/memcached/memcached_parse.h/.cpp` | Memcached text protocol parser (legacy + meta) |
+| `src/memcached/memcached_response.h/.cpp` | Memcached response formatters |
+| `src/memcached/memcached_command.h/.cpp` | Memcached command dispatch |
 | `tests/net/sim_io_backend.h` | Simulated backend for DST |
 | `tests/net/dst_test.cpp` | DST unit and DST integration tests |
 | `tests/net/io_uring_integration_test.cpp` | Real network integration tests via redis-cli |
 | `tests/net/dst_echo_test.cpp` | DST tests for echo protocol |
 | `tests/net/echo_integration_test.cpp` | Real network integration tests for echo protocol |
+| `tests/net/dst_memcached_test.cpp` | DST tests for memcached protocol |
+| `tests/net/memcached_integration_test.cpp` | Real network integration tests for memcached protocol |
+| `tests/net/memcached_fuzz_test.cpp` | Fuzz tests for memcached protocol |
+| `tests/memcached/memcached_parse_test.cpp` | Memcached parser unit tests |
+| `tests/memcached/memcached_command_test.cpp` | Memcached command dispatch unit tests |
 | `tests/redis/resp_test.cpp` | RESP parser/formatter unit tests |
 | `tests/redis/command_test.cpp` | Command dispatch unit tests |
 | `tests/smoke_test.cpp` | Build sanity smoke test |
@@ -378,7 +417,7 @@ Only `-ENOSPC` is retried; other close submission errors destroy connection stat
 - `g_tcp_nodelay_on` must be `static` because kernel reads it asynchronously.
 - `io_uring_register_ring_fd` should be called last in `uring_init`.
 - `-fno-exceptions` is mandatory (no `try`/`catch`).
-- Protocol is compile-time selected via `DALAHASH_PROTOCOL`; supported values are `redis` and `echo`.
+- Protocol is compile-time selected via `DALAHASH_PROTOCOL`; supported values are `redis`, `memcached`, and `echo`.
 - In Redis mode, store is per-worker (inside `ProtocolWorkerState`), not shared. With `--workers > 1`, key visibility depends on which worker accepted each connection.
 - Only close-submit `-ENOSPC` is retried; other close-submit failures are treated as terminal.
 - `store_get` uses `std::string(key)` lookup, which allocates on every GET (known inefficiency).

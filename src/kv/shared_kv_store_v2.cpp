@@ -1444,6 +1444,71 @@ KvSetStatus kv_store_set(KvStore* store, uint32_t worker_id, std::string_view ke
     return KvSetStatus::OOM;
 }
 
+KvDeleteStatus kv_store_delete(KvStore* store, uint32_t worker_id, std::string_view key, uint64_t now_ms) {
+    if (!store)
+        return KvDeleteStatus::INVALID;
+    ASSERT(store->shards != nullptr, "store shards must be initialized");
+    ASSERT(store->shard_count > 0, "shard_count must be non-zero");
+    ASSERT(store->shard_mask == store->shard_count - 1u, "shard_mask must equal shard_count-1");
+    WorkerState* ws = worker_state_registered(store, worker_id);
+    if (!ws)
+        return KvDeleteStatus::INVALID;
+
+    uint64_t hash = hash_bytes(key);
+    uint32_t shard_idx = select_shard(hash, store->shard_mask);
+    Shard* shard = &store->shards[shard_idx];
+    uint32_t b1 = static_cast<uint32_t>(hash) & shard->bucket_mask;
+    uint32_t b2 = secondary_bucket(hash, shard->bucket_mask, b1);
+
+    __builtin_prefetch(slot_ptr(shard, b1, 0), 0, 1);
+    __builtin_prefetch(slot_ptr(shard, b2, 0), 0, 1);
+
+    // Bounded retry loop for CAS contention (same pattern as kv_store_set).
+    for (uint32_t attempt = 0; attempt < 128; attempt++) {
+        const uint32_t buckets[2] = {b1, b2};
+        bool retry = false;
+        for (uint32_t bi = 0; bi < 2 && !retry; bi++) {
+            uint32_t bucket = buckets[bi];
+            for (uint32_t lane = 0; lane < KV_BUCKET_SLOTS && !retry; lane++) {
+                std::atomic<Node*>* slot = slot_ptr(shard, bucket, lane);
+                Node* node = slot->load(std::memory_order_acquire);
+                if (!node)
+                    continue;
+                if (node->hash != hash)
+                    continue;
+                if (!node_key_equals(node, key))
+                    continue;
+
+                // Found the key — treat expired as not found.
+                if (node_is_expired(node, now_ms)) {
+                    Node* expected = node;
+                    if (slot->compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel,
+                                                      std::memory_order_acquire)) {
+                        ws->local_live_delta -= static_cast<int64_t>(node->alloc_size);
+                        retire_node(store, worker_id, node);
+                    }
+                    return KvDeleteStatus::NOT_FOUND;
+                }
+
+                // CAS slot to nullptr to unpublish.
+                Node* expected = node;
+                if (slot->compare_exchange_strong(expected, nullptr, std::memory_order_acq_rel,
+                                                  std::memory_order_acquire)) {
+                    ws->local_live_delta -= static_cast<int64_t>(node->alloc_size);
+                    retire_node(store, worker_id, node);
+                    return KvDeleteStatus::OK;
+                }
+                // CAS failed — another thread changed the slot. Re-scan.
+                retry = true;
+            }
+        }
+        if (!retry)
+            break; // Key not found in any slot.
+    }
+
+    return KvDeleteStatus::NOT_FOUND;
+}
+
 uint64_t kv_store_live_bytes(const KvStore* store) {
     if (!store)
         return 0;

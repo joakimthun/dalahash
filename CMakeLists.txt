@@ -13,7 +13,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Protocol selection. v1 defaults to Redis.
 set(DALAHASH_PROTOCOL "redis" CACHE STRING "Application protocol")
-set_property(CACHE DALAHASH_PROTOCOL PROPERTY STRINGS redis echo)
+set_property(CACHE DALAHASH_PROTOCOL PROPERTY STRINGS redis echo memcached)
 
 # Shared KV implementation selection.
 set(DALAHASH_KV_IMPL "v2" CACHE STRING "Shared KV implementation")
@@ -83,6 +83,9 @@ add_library(dalahash_lib STATIC
     ${DALAHASH_KV_SOURCE}
     src/redis/resp.cpp
     src/redis/command.cpp
+    src/memcached/memcached_parse.cpp
+    src/memcached/memcached_response.cpp
+    src/memcached/memcached_command.cpp
     src/net/io_uring_backend.cpp
     src/net/worker.cpp
     src/net/server.cpp
@@ -100,6 +103,8 @@ if(DALAHASH_PROTOCOL STREQUAL "redis")
     target_compile_definitions(dalahash_lib PUBLIC DALAHASH_PROTOCOL_REDIS=1)
 elseif(DALAHASH_PROTOCOL STREQUAL "echo")
     target_compile_definitions(dalahash_lib PUBLIC DALAHASH_PROTOCOL_ECHO=1)
+elseif(DALAHASH_PROTOCOL STREQUAL "memcached")
+    target_compile_definitions(dalahash_lib PUBLIC DALAHASH_PROTOCOL_MEMCACHED=1)
 else()
     message(FATAL_ERROR "Unsupported DALAHASH_PROTOCOL: ${DALAHASH_PROTOCOL}")
 endif()
@@ -118,8 +123,7 @@ if(ENABLE_BENCHMARKS)
     add_subdirectory(bench)
 endif()
 
-# Only register the benchmark target when the build is Redis-protocol Release,
-# since the script drives memtier_benchmark which speaks Redis.
+# Register benchmark target for Redis and Memcached protocols.
 if(DALAHASH_PROTOCOL STREQUAL "redis")
     add_custom_target(benchmark
         COMMAND ${CMAKE_SOURCE_DIR}/bench/run_benchmark.sh --binary $<TARGET_FILE:dalahash>
@@ -128,11 +132,19 @@ if(DALAHASH_PROTOCOL STREQUAL "redis")
         COMMENT "Running end-to-end benchmark with memtier_benchmark"
         VERBATIM
     )
+elseif(DALAHASH_PROTOCOL STREQUAL "memcached")
+    add_custom_target(benchmark
+        COMMAND ${CMAKE_SOURCE_DIR}/bench/run_benchmark.sh --memcached --binary $<TARGET_FILE:dalahash>
+        DEPENDS dalahash
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Running end-to-end memcached benchmark with memtier_benchmark"
+        VERBATIM
+    )
 else()
     add_custom_target(benchmark
-        COMMAND ${CMAKE_COMMAND} -E echo "ERROR: benchmark target requires DALAHASH_PROTOCOL=redis (current: ${DALAHASH_PROTOCOL})"
+        COMMAND ${CMAKE_COMMAND} -E echo "ERROR: benchmark target requires DALAHASH_PROTOCOL=redis or memcached (current: ${DALAHASH_PROTOCOL})"
         COMMAND ${CMAKE_COMMAND} -E false
-        COMMENT "Benchmark requires Redis protocol build"
+        COMMENT "Benchmark requires Redis or Memcached protocol build"
     )
 endif()
 
