@@ -52,6 +52,28 @@ default thread registrations. The spaced form also works:
 ./build/bench/shared_kv_multi_thread_bench --shared_kv_threads 8
 ```
 
+Generate an SVG graph from the Google Benchmark JSON output:
+
+```bash
+./build/bench/shared_kv_multi_thread_bench \
+  --benchmark_out=/tmp/shared_kv_multi_thread.json \
+  --benchmark_out_format=json
+
+python3 bench/plot_shared_kv_multi_thread.py \
+  /tmp/shared_kv_multi_thread.json \
+  /tmp/shared_kv_multi_thread.svg
+
+# Narrow the graph to one workload/dataset when you want a cleaner chart.
+python3 bench/plot_shared_kv_multi_thread.py \
+  /tmp/shared_kv_multi_thread.json \
+  /tmp/shared_kv_mixed_4096.svg \
+  --workload Mixed80_20 \
+  --dataset 4096/16/64
+```
+
+The SVG renderer creates one panel per workload, uses `threads` on the x-axis, and plots
+Google Benchmark's `items_per_second` on the y-axis.
+
 Redis RESP parse/format/execute microbenchmarks:
 
 ```bash

@@ -2,5 +2,6 @@ build/
 build-*/
 build_*/
 bench/results/
+*__pycache__/
 *.local.json
 notes.txt
