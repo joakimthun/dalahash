@@ -415,6 +415,54 @@ TEST(SharedKvConcurrency, ConcurrentRegisterAndQuiescentRemainStable) {
     kv_store_destroy(s);
 }
 
+TEST(SharedKvConcurrency, ManyWritersBurstRefillDoesNotFalseOOM) {
+    static constexpr uint32_t kWorkers = 64;
+    static constexpr uint32_t kIters = 1024;
+
+    KvStoreConfig cfg = {
+        .capacity_bytes = 8ull << 20,
+        .shard_count = 64,
+        .buckets_per_shard = 256,
+        .worker_count = kWorkers,
+    };
+    KvStore* s = kv_store_create(&cfg);
+    ASSERT_NE(s, nullptr);
+    for (uint32_t i = 0; i < kWorkers; i++)
+        ASSERT_EQ(kv_store_register_worker(s, i), 0);
+
+    std::atomic<bool> start{false};
+    std::atomic<uint64_t> bad_status{0};
+    std::vector<std::thread> threads;
+    threads.reserve(kWorkers);
+
+    for (uint32_t i = 0; i < kWorkers; i++) {
+        threads.emplace_back([&, i]() {
+            const std::string key = "burst:" + std::to_string(i);
+            kvtest::wait_for_start(start);
+
+            for (uint32_t iter = 0; iter < kIters; iter++) {
+                std::string value = kvtest::make_value(i, iter + 1u, 0xabc000ull + iter);
+                KvSetStatus st = kv_store_set(s, i, key, value, 1000u + iter, nullptr);
+                if (st != KvSetStatus::OK) {
+                    bad_status.fetch_add(1, std::memory_order_relaxed);
+                    break;
+                }
+                if ((iter & 63u) == 0u)
+                    kv_store_quiescent(s, i);
+            }
+
+            kv_store_quiescent(s, i);
+        });
+    }
+
+    start.store(true, std::memory_order_release);
+    for (auto& t : threads)
+        t.join();
+
+    EXPECT_EQ(bad_status.load(std::memory_order_acquire), 0u);
+    kv_store_destroy(s);
+}
+
 TEST(SharedKvV2, QuiescentFastPathPublishesStats) {
     KvStoreConfig cfg = {
         .capacity_bytes = 4ull << 20,

@@ -443,14 +443,15 @@ static bool pool_grow(ClassPool* pool) {
 }
 
 // Batch-refill local cache from global Treiber stack.
-// Bounded total iterations prevents indefinite spinning under contention
-// (both pool_grow retries and CAS contention).
+//
+// Important:
+// - CAS failures here usually mean another thread popped the same head first.
+// - That is contention, not an allocation failure.
+// - Returning false on a burst of CAS losses turns temporary allocator
+//   contention into a user-visible OOM, which is incorrect for write-heavy
+//   benchmark paths.
 static bool local_cache_refill(ClassPool* pool, LocalClassCache* cache) {
-    static constexpr uint32_t MAX_ITERATIONS = LOCAL_CACHE_BATCH * 8;
-    uint32_t iterations = 0;
     for (uint32_t filled = 0; filled < LOCAL_CACHE_BATCH;) {
-        if (iterations++ >= MAX_ITERATIONS)
-            return filled > 0;
         FreeChunk* head = pool->free_head.load(std::memory_order_acquire);
         if (!head) {
             if (!pool_grow(pool))
