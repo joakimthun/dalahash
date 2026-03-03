@@ -97,10 +97,16 @@ def collect_panels(payload, workloads_filter, datasets_filter):
             continue
         name = run.get("name")
         items_per_second = run.get("items_per_second")
+        read_ops = run.get("read_ops", 0.0)
+        write_ops = run.get("write_ops", 0.0)
         threads = run.get("threads")
         if not isinstance(name, str):
             continue
         if not isinstance(items_per_second, (int, float)):
+            continue
+        if not isinstance(read_ops, (int, float)):
+            continue
+        if not isinstance(write_ops, (int, float)):
             continue
         if not isinstance(threads, int):
             continue
@@ -114,8 +120,13 @@ def collect_panels(payload, workloads_filter, datasets_filter):
             continue
         workload_entry = grouped.setdefault(workload, {})
         dataset_entry = workload_entry.setdefault(dataset, {})
-        thread_samples = dataset_entry.setdefault(threads, [])
-        thread_samples.append(float(items_per_second))
+        thread_samples = dataset_entry.setdefault(
+            threads,
+            {"items_per_second": [], "read_ops": [], "write_ops": []},
+        )
+        thread_samples["items_per_second"].append(float(items_per_second))
+        thread_samples["read_ops"].append(float(read_ops))
+        thread_samples["write_ops"].append(float(write_ops))
 
     panels = []
     for workload, series_by_dataset in grouped.items():
@@ -124,7 +135,14 @@ def collect_panels(payload, workloads_filter, datasets_filter):
             points = []
             for threads in sorted(series_by_dataset[dataset]):
                 samples = series_by_dataset[dataset][threads]
-                points.append((threads, sum(samples) / len(samples)))
+                points.append(
+                    {
+                        "thread": threads,
+                        "items_per_second": average(samples["items_per_second"]),
+                        "read_ops": average(samples["read_ops"]),
+                        "write_ops": average(samples["write_ops"]),
+                    }
+                )
             if points:
                 series_list.append({"dataset": dataset, "points": points})
         if series_list:
@@ -148,6 +166,10 @@ def format_rate(value: float, divisor: float) -> str:
     else:
         text = f"{scaled:.2f}"
     return text.rstrip("0").rstrip(".")
+
+
+def average(values) -> float:
+    return sum(values) / len(values)
 
 
 def map_x(value: int, minimum: int, maximum: int, left: float, width: float) -> float:
@@ -174,26 +196,37 @@ def build_svg(panels, title: str) -> str:
 
     all_threads = sorted(
         {
-            thread
+            point["thread"]
             for panel in panels
             for series in panel["series"]
-            for thread, _ in series["points"]
+            for point in series["points"]
         }
     )
     if not all_threads:
         raise ValueError("no thread counts found")
 
-    max_rate = max(
-        rate
+    max_items_rate = max(
+        point["items_per_second"]
         for panel in panels
         for series in panel["series"]
-        for _, rate in series["points"]
+        for point in series["points"]
     )
-    y_max = max_rate * 1.1 if max_rate > 0.0 else 1.0
-    rate_divisor, rate_suffix = choose_rate_unit(y_max)
-    y_axis_label = "items_per_second"
-    if rate_suffix:
-        y_axis_label = f"items_per_second ({rate_suffix})"
+    max_ops_rate = max(
+        max(point["read_ops"], point["write_ops"])
+        for panel in panels
+        for series in panel["series"]
+        for point in series["points"]
+    )
+    items_y_max = max_items_rate * 1.1 if max_items_rate > 0.0 else 1.0
+    ops_y_max = max_ops_rate * 1.1 if max_ops_rate > 0.0 else 1.0
+    items_divisor, items_suffix = choose_rate_unit(items_y_max)
+    ops_divisor, ops_suffix = choose_rate_unit(ops_y_max)
+    left_y_axis_label = "items_per_second"
+    if items_suffix:
+        left_y_axis_label = f"items_per_second ({items_suffix})"
+    right_y_axis_label = "read_ops / write_ops"
+    if ops_suffix:
+        right_y_axis_label = f"read_ops / write_ops ({ops_suffix})"
 
     cols = 1 if panel_count == 1 else 2
     rows = math.ceil(panel_count / cols)
@@ -203,7 +236,7 @@ def build_svg(panels, title: str) -> str:
     outer_margin_bottom = 60
     gap_x = 18
     gap_y = 18
-    panel_w = 540
+    panel_w = 580
     panel_h = 320
 
     width = outer_margin_x * 2 + cols * panel_w + max(0, cols - 1) * gap_x
@@ -211,10 +244,10 @@ def build_svg(panels, title: str) -> str:
 
     plot_offset_x = 62
     plot_offset_y = 54
-    plot_w = 300
+    plot_w = 290
     plot_h = 210
-    legend_offset_x = 382
-    legend_offset_y = 68
+    legend_offset_x = 410
+    dataset_legend_offset_y = 120
     legend_row_h = 18
 
     svg = [
@@ -236,7 +269,10 @@ def build_svg(panels, title: str) -> str:
         f'<text class="title" x="{width / 2:.1f}" y="30" text-anchor="middle">{escape_text(title)}</text>',
         f'<text class="axis-label" x="{width / 2:.1f}" y="{height - 16}" text-anchor="middle">threads</text>',
         f'<text class="axis-label" x="16" y="{height / 2:.1f}" transform="rotate(-90 16 {height / 2:.1f})" '
-        f'text-anchor="middle">{escape_text(y_axis_label)}</text>',
+        f'text-anchor="middle">{escape_text(left_y_axis_label)}</text>',
+        f'<text class="axis-label" x="{width - 16}" y="{height / 2:.1f}" '
+        f'transform="rotate(90 {width - 16} {height / 2:.1f})" '
+        f'text-anchor="middle">{escape_text(right_y_axis_label)}</text>',
     ]
 
     min_thread = all_threads[0]
@@ -250,7 +286,7 @@ def build_svg(panels, title: str) -> str:
         plot_x = panel_x + plot_offset_x
         plot_y = panel_y + plot_offset_y
         legend_x = panel_x + legend_offset_x
-        legend_y = panel_y + legend_offset_y
+        dataset_legend_y = panel_y + dataset_legend_offset_y
 
         svg.append(
             f'<rect class="panel" x="{panel_x}" y="{panel_y}" width="{panel_w}" height="{panel_h}" rx="8" />'
@@ -264,12 +300,18 @@ def build_svg(panels, title: str) -> str:
 
         y_tick_count = 5
         for tick_index in range(y_tick_count):
-            tick_value = y_max * (tick_index / float(y_tick_count - 1))
-            y = map_y(tick_value, y_max, plot_y, plot_h)
+            tick_value = items_y_max * (tick_index / float(y_tick_count - 1))
+            y = map_y(tick_value, items_y_max, plot_y, plot_h)
             svg.append(f'<line class="grid" x1="{plot_x}" y1="{y:.1f}" x2="{plot_x + plot_w}" y2="{y:.1f}" />')
             svg.append(
                 f'<text class="tick" x="{plot_x - 8}" y="{y + 4:.1f}" text-anchor="end">'
-                f"{escape_text(format_rate(tick_value, rate_divisor))}</text>"
+                f"{escape_text(format_rate(tick_value, items_divisor))}</text>"
+            )
+            ops_tick_value = ops_y_max * (tick_index / float(y_tick_count - 1))
+            ops_y = map_y(ops_tick_value, ops_y_max, plot_y, plot_h)
+            svg.append(
+                f'<text class="tick" x="{plot_x + plot_w + 8}" y="{ops_y + 4:.1f}" text-anchor="start">'
+                f"{escape_text(format_rate(ops_tick_value, ops_divisor))}</text>"
             )
 
         for thread in all_threads:
@@ -282,30 +324,91 @@ def build_svg(panels, title: str) -> str:
 
         svg.append(f'<line class="axis" x1="{plot_x}" y1="{plot_y}" x2="{plot_x}" y2="{plot_y + plot_h}" />')
         svg.append(
+            f'<line class="axis" x1="{plot_x + plot_w}" y1="{plot_y}" x2="{plot_x + plot_w}" y2="{plot_y + plot_h}" />'
+        )
+        svg.append(
             f'<line class="axis" x1="{plot_x}" y1="{plot_y + plot_h}" x2="{plot_x + plot_w}" y2="{plot_y + plot_h}" />'
         )
+        metric_legend_y = panel_y + 62
+        for label, dash in (
+            ("items_per_second", None),
+            ("read_ops", "7 4"),
+            ("write_ops", "2.5 3.5"),
+        ):
+            line_attrs = ""
+            if dash is not None:
+                line_attrs = f' stroke-dasharray="{dash}"'
+            svg.append(
+                f'<line x1="{legend_x}" y1="{metric_legend_y}" x2="{legend_x + 16}" y2="{metric_legend_y}" '
+                f'stroke="#111827" stroke-width="2.25" stroke-linecap="round"{line_attrs} />'
+            )
+            svg.append(
+                f'<text class="legend" x="{legend_x + 24}" y="{metric_legend_y + 4}">{escape_text(label)}</text>'
+            )
+            metric_legend_y += legend_row_h
 
         for series_index, series in enumerate(panel["series"]):
             color = PALETTE[series_index % len(PALETTE)]
-            points = [
+            has_read_points = any(point["read_ops"] > 0.0 for point in series["points"])
+            has_write_points = any(point["write_ops"] > 0.0 for point in series["points"])
+            item_points = [
                 (
-                    map_x(thread, min_thread, max_thread, plot_x, plot_w),
-                    map_y(rate, y_max, plot_y, plot_h),
+                    map_x(point["thread"], min_thread, max_thread, plot_x, plot_w),
+                    map_y(point["items_per_second"], items_y_max, plot_y, plot_h),
                 )
-                for thread, rate in series["points"]
+                for point in series["points"]
             ]
-            if len(points) >= 2:
-                polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
+            read_points = [
+                (
+                    map_x(point["thread"], min_thread, max_thread, plot_x, plot_w),
+                    map_y(point["read_ops"], ops_y_max, plot_y, plot_h),
+                )
+                for point in series["points"]
+            ]
+            write_points = [
+                (
+                    map_x(point["thread"], min_thread, max_thread, plot_x, plot_w),
+                    map_y(point["write_ops"], ops_y_max, plot_y, plot_h),
+                )
+                for point in series["points"]
+            ]
+            if len(item_points) >= 2:
+                polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in item_points)
                 svg.append(
                     f'<polyline points="{polyline}" fill="none" stroke="{color}" '
                     'stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" />'
                 )
-            for x, y in points:
+            if has_read_points and len(read_points) >= 2:
+                polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in read_points)
+                svg.append(
+                    f'<polyline points="{polyline}" fill="none" stroke="{color}" '
+                    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" '
+                    'stroke-dasharray="7 4" />'
+                )
+            if has_write_points and len(write_points) >= 2:
+                polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in write_points)
+                svg.append(
+                    f'<polyline points="{polyline}" fill="none" stroke="{color}" '
+                    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" '
+                    'stroke-dasharray="2.5 3.5" />'
+                )
+            for x, y in item_points:
                 svg.append(
                     f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.5" fill="{color}" stroke="#ffffff" stroke-width="1" />'
                 )
+            if has_read_points:
+                for x, y in read_points:
+                    svg.append(
+                        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="#ffffff" stroke="{color}" stroke-width="1.5" />'
+                    )
+            if has_write_points:
+                for x, y in write_points:
+                    svg.append(
+                        f'<rect x="{x - 2.6:.1f}" y="{y - 2.6:.1f}" width="5.2" height="5.2" fill="#ffffff" '
+                        f'stroke="{color}" stroke-width="1.4" />'
+                    )
 
-            legend_item_y = legend_y + series_index * legend_row_h
+            legend_item_y = dataset_legend_y + series_index * legend_row_h
             svg.append(
                 f'<line x1="{legend_x}" y1="{legend_item_y}" x2="{legend_x + 16}" y2="{legend_item_y}" '
                 f'stroke="{color}" stroke-width="2.25" stroke-linecap="round" />'
