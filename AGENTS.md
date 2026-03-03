@@ -92,10 +92,7 @@ Protocol selection is compile-time via CMake cache variable:
 - `-DDALAHASH_PROTOCOL=memcached`
 - `-DDALAHASH_PROTOCOL=echo`
 
-Shared KV implementation selection is separate:
-
-- `-DDALAHASH_KV_IMPL=v1`
-- `-DDALAHASH_KV_IMPL=v2` (default)
+Shared KV uses the built-in implementation in `src/kv/shared_kv_store.cpp`.
 
 Optional build toggles:
 
@@ -404,11 +401,9 @@ Current startup constants in `src/net/server.cpp`:
 | `src/memcached/memcached_command.h/.cpp` | Memcached command execution |
 | `src/store/store.h` | Protocol-facing store wrapper |
 | `src/kv/shared_kv_store.h` | Shared KV public API |
-| `src/kv/shared_kv_store.cpp` | KV implementation v1 |
-| `src/kv/shared_kv_store_v2.cpp` | KV implementation v2 |
-| `src/kv/shared_kv_store_internal_stats.h` | Internal stats exposed to v2 benchmarks |
-| `src/kv/DESIGN.md` | v1 KV design notes |
-| `src/kv/DESIGN_V2.md` | v2 KV design notes |
+| `src/kv/shared_kv_store.cpp` | Current shared KV implementation |
+| `src/kv/shared_kv_store_internal_stats.h` | Internal stats exposed to benchmarks |
+| `src/kv/DESIGN_V2.md` | Current shared KV design notes |
 | `tests/CMakeLists.txt` | Test target wiring |
 | `tests/cli_test.cpp` | CLI parser unit tests |
 | `tests/net/server_test.cpp` | Server startup failure tests |
@@ -439,6 +434,6 @@ Current startup constants in `src/net/server.cpp`:
 - `g_tcp_nodelay_on` must stay `static` because the kernel reads it asynchronously.
 - `io_uring_register_ring_fd` should be called last during ring setup.
 - `-fno-exceptions` is mandatory.
-- Protocol selection (`DALAHASH_PROTOCOL`) and KV implementation selection (`DALAHASH_KV_IMPL`) are separate build knobs.
+- Shared KV uses the single implementation in `src/kv/shared_kv_store.cpp`.
 - All workers share one `KvStore`; do not assume per-worker key isolation.
 - Only close-submit `-ENOSPC` is retried; other close-submit failures are treated as terminal.

@@ -170,7 +170,6 @@ static void add_all_args(benchmark::internal::Benchmark* b) {
 }
 
 static void add_v2_stats(benchmark::State& state, KvStore* store) {
-#if defined(DALAHASH_KV_IMPL_V2)
     KvStoreInternalStats stats = {};
     if (!kv_store_internal_stats_snapshot(store, &stats))
         return;
@@ -196,10 +195,6 @@ static void add_v2_stats(benchmark::State& state, KvStore* store) {
         benchmark::Counter(static_cast<double>(stats.retired_nodes_enqueued), kAvg);
     state.counters["v2_maintenance_runs"] =
         benchmark::Counter(static_cast<double>(stats.maintenance_runs), kAvg);
-#else
-    (void)state;
-    (void)store;
-#endif
 }
 
 class SharedKvMultiFixture : public benchmark::Fixture {

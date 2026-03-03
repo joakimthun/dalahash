@@ -415,7 +415,6 @@ TEST(SharedKvConcurrency, ConcurrentRegisterAndQuiescentRemainStable) {
     kv_store_destroy(s);
 }
 
-#if defined(DALAHASH_KV_IMPL_V2)
 TEST(SharedKvV2, QuiescentFastPathPublishesStats) {
     KvStoreConfig cfg = {
         .capacity_bytes = 4ull << 20,
@@ -450,4 +449,3 @@ TEST(SharedKvV2, QuiescentFastPathPublishesStats) {
 
     kv_store_destroy(s);
 }
-#endif

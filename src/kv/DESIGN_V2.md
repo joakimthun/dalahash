@@ -1,11 +1,11 @@
-# Shared KV Store V2 Design (`src/kv/shared_kv_store_v2.cpp`)
+# Shared KV Store V2 Design (`src/kv/shared_kv_store.cpp`)
 
 ## 1. Purpose and Scope
 
 This document describes the current `v2` shared key/value store implementation in:
 
 - `src/kv/shared_kv_store.h`
-- `src/kv/shared_kv_store_v2.cpp`
+- `src/kv/shared_kv_store.cpp`
 - `src/kv/shared_kv_store_internal_stats.h`
 
 `v2` keeps the same public API as `v1`, but changes the internal implementation to reduce the amount of reclamation work paid on the request path, especially under mixed read/write workloads.
@@ -31,18 +31,19 @@ This document is intentionally code-specific. It describes what `v2` actually do
 
 ---
 
-## 2. Build Selection and API Compatibility
+## 2. Build Wiring and API Compatibility
 
-### 2.1 Build-time selection
+### 2.1 Build-time wiring
 
-The build system selects the implementation via the CMake cache variable:
+The build now always compiles the current implementation in:
 
-- `DALAHASH_KV_IMPL=v1`
-- `DALAHASH_KV_IMPL=v2`
+- `src/kv/shared_kv_store.h`
+- `src/kv/shared_kv_store.cpp`
+- `src/kv/shared_kv_store_internal_stats.h`
 
 Current wiring is in `CMakeLists.txt`.
 
-`v1` and `v2` expose the same public API and are intended to be interchangeable from the caller's point of view.
+This implementation preserves the public API that was shared with the legacy store.
 
 ### 2.2 Public API surface
 
