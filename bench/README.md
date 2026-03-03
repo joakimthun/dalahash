@@ -89,7 +89,7 @@ Memcached parse/format/execute microbenchmarks:
 Current benchmark families:
 
 - `shared_kv_single_thread_bench`: `Set`, `GetHit`, `GetMiss`, `DeleteHit`, `SetWithTtl`
-- `shared_kv_multi_thread_bench`: `Mixed80_20`, `Get100`, `Get80Miss20Hit`, `Set100Overwrite`, `Delete50Set50`, `TtlChurn`
+- `shared_kv_multi_thread_bench`: `Mixed80_20`, `Mixed95_5`, `Get100`, `Get80Miss20Hit`, `Set100Overwrite`, `Delete50Set50`, `TtlChurn`
 - `redis_resp_bench`: RESP parse (`GET`, `SET`, pipelined parse, mixed pipelined parse), RESP bulk formatting, Redis command execution (`SET`, `SETEX`)
 - `memcached_protocol_bench`: memcached parse (legacy and meta), command execution (legacy and meta), response formatting (`VALUE`, `VA`, `HD`)
 

@@ -315,17 +315,22 @@ class SharedKvMultiFixture : public benchmark::Fixture {
     }
 };
 
-BENCHMARK_DEFINE_F(SharedKvMultiFixture, Mixed80_20)(benchmark::State& state) {
+static void run_mixed_benchmark(benchmark::State& state, uint64_t seed_tag, uint32_t branch_modulus,
+                                uint32_t read_threshold, const char* get_error, const char* set_error) {
     if (!g_ctx || !g_ctx->store || g_ctx->keys.empty() || g_ctx->values.empty()) {
         state.SkipWithError("multi benchmark context setup failed");
+        return;
+    }
+    if (branch_modulus == 0 || read_threshold > branch_modulus) {
+        state.SkipWithError("invalid mixed benchmark ratio");
         return;
     }
 
     const uint32_t worker_id = static_cast<uint32_t>(state.thread_index());
     const uint64_t base_seed =
-        kvbench::mix_seed(0x6d756c74695f7277ull, static_cast<uint64_t>(g_ctx->dataset_size) ^
-                                                     (static_cast<uint64_t>(g_ctx->key_size) << 21u) ^
-                                                     (static_cast<uint64_t>(g_ctx->value_size) << 42u));
+        kvbench::mix_seed(seed_tag, static_cast<uint64_t>(g_ctx->dataset_size) ^
+                                        (static_cast<uint64_t>(g_ctx->key_size) << 21u) ^
+                                        (static_cast<uint64_t>(g_ctx->value_size) << 42u));
     kvbench::XorShift64 rng(kvbench::mix_seed(base_seed, worker_id + 1u));
 
     uint64_t read_ops = 0;
@@ -340,11 +345,11 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, Mixed80_20)(benchmark::State& state) {
         const uint32_t key_idx = static_cast<uint32_t>(r % g_ctx->keys.size());
         const std::string& key = g_ctx->keys[key_idx];
 
-        if ((r % 10u) < 8u) {
+        if ((r % branch_modulus) < read_threshold) {
             KvValueView out = {};
             KvGetStatus gs = kv_store_get(g_ctx->store, worker_id, key, now_ms, &out);
             if (gs != KvGetStatus::HIT) {
-                state.SkipWithError("kv_store_get miss in mixed benchmark");
+                state.SkipWithError(get_error);
                 break;
             }
             benchmark::DoNotOptimize(out.data);
@@ -356,7 +361,7 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, Mixed80_20)(benchmark::State& state) {
             const std::string& value = g_ctx->values[value_idx];
             KvSetStatus st = kv_store_set(g_ctx->store, worker_id, key, value, now_ms, nullptr);
             if (st != KvSetStatus::OK) {
-                state.SkipWithError("kv_store_set failed in mixed benchmark");
+                state.SkipWithError(set_error);
                 break;
             }
             write_ops++;
@@ -377,6 +382,16 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, Mixed80_20)(benchmark::State& state) {
     state.counters["write_ops"] =
         benchmark::Counter(static_cast<double>(write_ops), benchmark::Counter::kIsRate);
     add_v2_stats(state, g_ctx->store);
+}
+
+BENCHMARK_DEFINE_F(SharedKvMultiFixture, Mixed80_20)(benchmark::State& state) {
+    run_mixed_benchmark(state, 0x6d756c74695f7277ull, 10u, 8u, "kv_store_get miss in mixed80_20 benchmark",
+                        "kv_store_set failed in mixed80_20 benchmark");
+}
+
+BENCHMARK_DEFINE_F(SharedKvMultiFixture, Mixed95_5)(benchmark::State& state) {
+    run_mixed_benchmark(state, 0x6d756c74695f3935ull, 20u, 19u, "kv_store_get miss in mixed95_5 benchmark",
+                        "kv_store_set failed in mixed95_5 benchmark");
 }
 
 BENCHMARK_DEFINE_F(SharedKvMultiFixture, Get100)(benchmark::State& state) {
@@ -683,6 +698,11 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, TtlChurn)(benchmark::State& state) {
 
 static void register_benchmarks() {
     BENCHMARK_REGISTER_F(SharedKvMultiFixture, Mixed80_20)
+        ->Apply(add_all_args)
+        ->Apply(add_thread_args)
+        ->UseRealTime();
+
+    BENCHMARK_REGISTER_F(SharedKvMultiFixture, Mixed95_5)
         ->Apply(add_all_args)
         ->Apply(add_thread_args)
         ->UseRealTime();
