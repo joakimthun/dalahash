@@ -5,15 +5,23 @@
 
 #include <benchmark/benchmark.h>
 
+#include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <cstdint>
+#include <cstdio>
 #include <mutex>
 #include <new>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <thread>
 #include <vector>
 
 namespace {
+
+constexpr std::string_view kSharedKvThreadsFlag = "--shared_kv_threads";
+constexpr std::string_view kSharedKvThreadsFlagEq = "--shared_kv_threads=";
 
 struct MultiBenchContext {
     KvStore* store = nullptr;
@@ -29,6 +37,7 @@ struct MultiBenchContext {
 static MultiBenchContext* g_ctx = nullptr;
 static std::mutex g_ctx_mu;
 static std::atomic<uint32_t> g_teardown_count{0};
+static std::vector<int> g_thread_counts;
 
 static uint32_t next_pow2_u32(uint32_t v) {
     if (v <= 1)
@@ -167,6 +176,87 @@ static void add_all_args(benchmark::internal::Benchmark* b) {
     add_baseline_args(b);
     add_large_dataset_args(b);
     add_larger_key_value_dataset_args(b);
+}
+
+static bool append_thread_count(std::string_view token) {
+    if (token.empty())
+        return false;
+
+    int thread_count = 0;
+    const char* begin = token.data();
+    const char* end = begin + token.size();
+    const std::from_chars_result parsed = std::from_chars(begin, end, thread_count);
+    if (parsed.ec != std::errc() || parsed.ptr != end || thread_count <= 0)
+        return false;
+
+    if (std::find(g_thread_counts.begin(), g_thread_counts.end(), thread_count) == g_thread_counts.end()) {
+        g_thread_counts.push_back(thread_count);
+    }
+    return true;
+}
+
+static bool parse_thread_counts(std::string_view spec) {
+    if (spec.empty())
+        return false;
+
+    std::size_t pos = 0;
+    while (pos < spec.size()) {
+        const std::size_t next = spec.find(',', pos);
+        const std::size_t count = next == std::string_view::npos ? spec.size() - pos : next - pos;
+        if (!append_thread_count(spec.substr(pos, count)))
+            return false;
+        if (next == std::string_view::npos)
+            break;
+        pos = next + 1u;
+    }
+    return true;
+}
+
+static bool parse_custom_cli_flags(int* argc, char** argv) {
+    if (!argc || !argv)
+        return true;
+
+    int write_idx = 1;
+    const int original_argc = *argc;
+    for (int read_idx = 1; read_idx < original_argc; read_idx++) {
+        std::string_view arg(argv[read_idx]);
+        if (arg.rfind(kSharedKvThreadsFlagEq, 0) == 0) {
+            if (!parse_thread_counts(arg.substr(kSharedKvThreadsFlagEq.size()))) {
+                std::fprintf(stderr, "invalid value for %.*s: %s\n",
+                             static_cast<int>(kSharedKvThreadsFlag.size()), kSharedKvThreadsFlag.data(),
+                             argv[read_idx]);
+                return false;
+            }
+            continue;
+        }
+
+        if (arg == kSharedKvThreadsFlag) {
+            if (read_idx + 1 >= original_argc || !parse_thread_counts(argv[read_idx + 1])) {
+                std::fprintf(stderr, "missing or invalid value for %.*s\n",
+                             static_cast<int>(kSharedKvThreadsFlag.size()), kSharedKvThreadsFlag.data());
+                return false;
+            }
+            read_idx++;
+            continue;
+        }
+
+        argv[write_idx++] = argv[read_idx];
+    }
+
+    *argc = write_idx;
+    if (write_idx < original_argc)
+        argv[write_idx] = nullptr;
+    return true;
+}
+
+static void add_thread_args(benchmark::internal::Benchmark* b) {
+    if (g_thread_counts.empty()) {
+        b->ThreadRange(1, 16);
+        return;
+    }
+
+    for (int thread_count : g_thread_counts)
+        b->Threads(thread_count);
 }
 
 static void add_v2_stats(benchmark::State& state, KvStore* store) {
@@ -591,30 +681,63 @@ BENCHMARK_DEFINE_F(SharedKvMultiFixture, TtlChurn)(benchmark::State& state) {
     add_v2_stats(state, g_ctx->store);
 }
 
-BENCHMARK_REGISTER_F(SharedKvMultiFixture, Mixed80_20)
-    ->Apply(add_all_args)
-    ->ThreadRange(1, 16)
-    ->UseRealTime();
+static void register_benchmarks() {
+    BENCHMARK_REGISTER_F(SharedKvMultiFixture, Mixed80_20)
+        ->Apply(add_all_args)
+        ->Apply(add_thread_args)
+        ->UseRealTime();
 
-BENCHMARK_REGISTER_F(SharedKvMultiFixture, Get100)->Apply(add_all_args)->ThreadRange(1, 16)->UseRealTime();
+    BENCHMARK_REGISTER_F(SharedKvMultiFixture, Get100)
+        ->Apply(add_all_args)
+        ->Apply(add_thread_args)
+        ->UseRealTime();
 
-BENCHMARK_REGISTER_F(SharedKvMultiFixture, Get80Miss20Hit)
-    ->Apply(add_all_args)
-    ->ThreadRange(1, 16)
-    ->UseRealTime();
+    BENCHMARK_REGISTER_F(SharedKvMultiFixture, Get80Miss20Hit)
+        ->Apply(add_all_args)
+        ->Apply(add_thread_args)
+        ->UseRealTime();
 
-BENCHMARK_REGISTER_F(SharedKvMultiFixture, Set100Overwrite)
-    ->Apply(add_all_args)
-    ->ThreadRange(1, 16)
-    ->UseRealTime();
+    BENCHMARK_REGISTER_F(SharedKvMultiFixture, Set100Overwrite)
+        ->Apply(add_all_args)
+        ->Apply(add_thread_args)
+        ->UseRealTime();
 
-BENCHMARK_REGISTER_F(SharedKvMultiFixture, Delete50Set50)
-    ->Apply(add_all_args)
-    ->ThreadRange(1, 16)
-    ->UseRealTime();
+    BENCHMARK_REGISTER_F(SharedKvMultiFixture, Delete50Set50)
+        ->Apply(add_all_args)
+        ->Apply(add_thread_args)
+        ->UseRealTime();
 
-BENCHMARK_REGISTER_F(SharedKvMultiFixture, TtlChurn)->Apply(add_all_args)->ThreadRange(1, 16)->UseRealTime();
+    BENCHMARK_REGISTER_F(SharedKvMultiFixture, TtlChurn)
+        ->Apply(add_all_args)
+        ->Apply(add_thread_args)
+        ->UseRealTime();
+}
+
+static void print_benchmark_help() {
+    benchmark::PrintDefaultHelp();
+    std::fputs("\nShared KV multi-thread benchmark options:\n", stdout);
+    std::fputs("  --shared_kv_threads=<n[,m,...]>  Override thread counts for SharedKvMultiFixture.\n",
+               stdout);
+}
 
 } // namespace
 
-BENCHMARK_MAIN();
+int main(int argc, char** argv) {
+    char arg0_default[] = "benchmark";
+    char* args_default = arg0_default;
+    if (!argv) {
+        argc = 1;
+        argv = &args_default;
+    }
+
+    if (!parse_custom_cli_flags(&argc, argv))
+        return 1;
+
+    register_benchmarks();
+    benchmark::Initialize(&argc, argv, print_benchmark_help);
+    if (benchmark::ReportUnrecognizedArguments(argc, argv))
+        return 1;
+    benchmark::RunSpecifiedBenchmarks();
+    benchmark::Shutdown();
+    return 0;
+}

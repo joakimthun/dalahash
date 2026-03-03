@@ -40,6 +40,16 @@ Multi-thread shared KV workloads:
 
 ```bash
 ./build/bench/shared_kv_multi_thread_bench
+
+# Override the default thread set (1,2,4,8,16)
+./build/bench/shared_kv_multi_thread_bench --shared_kv_threads=3,5
+```
+
+`shared_kv_multi_thread_bench` accepts `--shared_kv_threads=<n[,m,...]>` to override the
+default thread registrations. The spaced form also works:
+
+```bash
+./build/bench/shared_kv_multi_thread_bench --shared_kv_threads 8
 ```
 
 Redis RESP parse/format/execute microbenchmarks:
@@ -68,7 +78,8 @@ Run only one benchmark family or one argument case:
   --benchmark_filter='BM_SharedKvSingleGetMiss/2000000/16/64/real_time$'
 
 ./build/bench/shared_kv_multi_thread_bench \
-  --benchmark_filter='SharedKvMultiFixture/Get80Miss20Hit/4000000/24/128/real_time/threads:8$'
+  --benchmark_filter='^SharedKvMultiFixture/(Mixed80_20|Get100)/4000000/128/256/' \
+  --shared_kv_threads=3,5
 
 ./build/bench/memcached_protocol_bench \
   --benchmark_filter='BM_McCommandMetaGetValue/32/256$'
