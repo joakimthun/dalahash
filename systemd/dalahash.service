@@ -1,0 +1,63 @@
+# This service runs dalahash inside dalahash.slice so the process inherits the
+# dedicated CPU partition defined in dalahash.slice.
+#
+# The configuration is intentionally split into two phases:
+#   1) ExecStartPre runs the tuning script as root in --no-launch mode. That
+#      step rewrites NIC queue masks and IRQ affinities, and it logs the full
+#      host topology to the journal.
+#   2) ExecStart launches the dalahash binary directly as ec2-user, keeping the
+#      long-lived process unprivileged while still inheriting the slice's
+#      AllowedCPUs and LimitNOFILE settings.
+#
+# This unit is tuned for the inspected c8gn.16xlarge host:
+#   - 16 ENA combined queues
+#   - 16 dalahash workers
+#   - CPUs 0-15 reserved in dalahash.slice
+# If that host plan changes, update ExecStart, LimitNOFILE, and the slice
+# together so the queue/IRQ/worker mapping remains consistent.
+[Unit]
+Description=dalahash high-performance server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+
+# Run inside the dedicated CPU partition rather than the default system.slice.
+Slice=dalahash.slice
+
+# Keep the long-lived server process unprivileged.
+User=ec2-user
+Group=ec2-user
+
+# ExecStartPre must still run as root because it writes IRQ affinity files,
+# queue masks, and may disable irqbalance.
+PermissionsStartOnly=true
+
+# The launcher expects to run from the repo root when it resolves relative
+# paths and emits logs.
+WorkingDirectory=/home/ec2-user/dalahash
+
+# Tune the host and NIC first, but do not launch dalahash from the script in
+# this phase. That keeps the service's main process under systemd's direct
+# supervision and makes restarts simpler.
+ExecStartPre=/home/ec2-user/dalahash/run_dalahash_aws_perf.sh --no-launch
+
+# Keep the worker count fixed at 16 so it matches the 16 ENA queues and the
+# CPUs exposed by dalahash.slice.
+ExecStart=/home/ec2-user/dalahash/build/dalahash --port 6379 --workers 16
+
+# Restart only when the server fails, not after a clean stop.
+Restart=on-failure
+RestartSec=1
+
+# 16 workers require:
+#   64 + 16 * (65536 + 4) = 1,048,704
+# This keeps the process-side RLIMIT high enough that dalahash does not shrink
+# its per-worker io_uring fixed-file tables.
+LimitNOFILE=1048704
+
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+# This dedicated slice reserves the hot-path CPUs for dalahash itself.
+#
+# The paired launcher pins queue/IRQ/worker N to CPU N, and the dalahash
+# process then spawns one worker per CPU in this prefix. As long as CPUs 0-15
+# stay inside this slice, the process can keep its exact one-queue-per-core
+# layout without interference from user.slice or system.slice workloads.
+[Unit]
+Description=Dedicated CPU partition for dalahash
+Before=slices.target
+
+[Slice]
+# Keep the full 16-CPU worker prefix visible to the service. If the chosen
+# worker count changes, update this range to match the worker CPUs that
+# dalahash should own.
+AllowedCPUs=0-15
