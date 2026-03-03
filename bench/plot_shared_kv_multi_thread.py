@@ -96,13 +96,10 @@ def collect_panels(payload, workloads_filter, datasets_filter):
         if run.get("run_type") != "iteration":
             continue
         name = run.get("name")
-        items_per_second = run.get("items_per_second")
         read_ops = run.get("read_ops", 0.0)
         write_ops = run.get("write_ops", 0.0)
         threads = run.get("threads")
         if not isinstance(name, str):
-            continue
-        if not isinstance(items_per_second, (int, float)):
             continue
         if not isinstance(read_ops, (int, float)):
             continue
@@ -122,9 +119,8 @@ def collect_panels(payload, workloads_filter, datasets_filter):
         dataset_entry = workload_entry.setdefault(dataset, {})
         thread_samples = dataset_entry.setdefault(
             threads,
-            {"items_per_second": [], "read_ops": [], "write_ops": []},
+            {"read_ops": [], "write_ops": []},
         )
-        thread_samples["items_per_second"].append(float(items_per_second))
         thread_samples["read_ops"].append(float(read_ops))
         thread_samples["write_ops"].append(float(write_ops))
 
@@ -138,7 +134,6 @@ def collect_panels(payload, workloads_filter, datasets_filter):
                 points.append(
                     {
                         "thread": threads,
-                        "items_per_second": average(samples["items_per_second"]),
                         "read_ops": average(samples["read_ops"]),
                         "write_ops": average(samples["write_ops"]),
                     }
@@ -185,6 +180,12 @@ def map_y(value: float, maximum: float, top: float, height: float) -> float:
     return top + height - (clamped / maximum) * height
 
 
+def offset_plot_y(value: float, delta: float, top: float, height: float, margin: float = 3.0) -> float:
+    lower = top + margin
+    upper = top + height - margin
+    return min(max(value + delta, lower), upper)
+
+
 def escape_text(value: str) -> str:
     return html.escape(value, quote=True)
 
@@ -205,28 +206,28 @@ def build_svg(panels, title: str) -> str:
     if not all_threads:
         raise ValueError("no thread counts found")
 
-    max_items_rate = max(
-        point["items_per_second"]
+    max_read_rate = max(
+        point["read_ops"]
         for panel in panels
         for series in panel["series"]
         for point in series["points"]
     )
-    max_ops_rate = max(
-        max(point["read_ops"], point["write_ops"])
+    max_write_rate = max(
+        point["write_ops"]
         for panel in panels
         for series in panel["series"]
         for point in series["points"]
     )
-    items_y_max = max_items_rate * 1.1 if max_items_rate > 0.0 else 1.0
-    ops_y_max = max_ops_rate * 1.1 if max_ops_rate > 0.0 else 1.0
-    items_divisor, items_suffix = choose_rate_unit(items_y_max)
-    ops_divisor, ops_suffix = choose_rate_unit(ops_y_max)
-    left_y_axis_label = "items_per_second"
-    if items_suffix:
-        left_y_axis_label = f"items_per_second ({items_suffix})"
-    right_y_axis_label = "read_ops / write_ops"
-    if ops_suffix:
-        right_y_axis_label = f"read_ops / write_ops ({ops_suffix})"
+    left_y_max = max_read_rate * 1.1 if max_read_rate > 0.0 else 1.0
+    right_y_max = max_write_rate * 1.1 if max_write_rate > 0.0 else 1.0
+    left_divisor, left_suffix = choose_rate_unit(left_y_max)
+    right_divisor, right_suffix = choose_rate_unit(right_y_max)
+    left_y_axis_label = "read_ops"
+    if left_suffix:
+        left_y_axis_label = f"read_ops ({left_suffix})"
+    right_y_axis_label = "write_ops"
+    if right_suffix:
+        right_y_axis_label = f"write_ops ({right_suffix})"
 
     cols = 1 if panel_count == 1 else 2
     rows = math.ceil(panel_count / cols)
@@ -249,6 +250,9 @@ def build_svg(panels, title: str) -> str:
     legend_offset_x = 410
     dataset_legend_offset_y = 120
     legend_row_h = 18
+    plot_bg_fill = "#f9fafb"
+    write_dash = "10 6"
+    write_offset_px = 4.0
 
     svg = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
@@ -300,18 +304,18 @@ def build_svg(panels, title: str) -> str:
 
         y_tick_count = 5
         for tick_index in range(y_tick_count):
-            tick_value = items_y_max * (tick_index / float(y_tick_count - 1))
-            y = map_y(tick_value, items_y_max, plot_y, plot_h)
+            tick_value = left_y_max * (tick_index / float(y_tick_count - 1))
+            y = map_y(tick_value, left_y_max, plot_y, plot_h)
             svg.append(f'<line class="grid" x1="{plot_x}" y1="{y:.1f}" x2="{plot_x + plot_w}" y2="{y:.1f}" />')
             svg.append(
                 f'<text class="tick" x="{plot_x - 8}" y="{y + 4:.1f}" text-anchor="end">'
-                f"{escape_text(format_rate(tick_value, items_divisor))}</text>"
+                f"{escape_text(format_rate(tick_value, left_divisor))}</text>"
             )
-            ops_tick_value = ops_y_max * (tick_index / float(y_tick_count - 1))
-            ops_y = map_y(ops_tick_value, ops_y_max, plot_y, plot_h)
+            right_tick_value = right_y_max * (tick_index / float(y_tick_count - 1))
+            right_y = map_y(right_tick_value, right_y_max, plot_y, plot_h)
             svg.append(
-                f'<text class="tick" x="{plot_x + plot_w + 8}" y="{ops_y + 4:.1f}" text-anchor="start">'
-                f"{escape_text(format_rate(ops_tick_value, ops_divisor))}</text>"
+                f'<text class="tick" x="{plot_x + plot_w + 8}" y="{right_y + 4:.1f}" text-anchor="start">'
+                f"{escape_text(format_rate(right_tick_value, right_divisor))}</text>"
             )
 
         for thread in all_threads:
@@ -331,16 +335,17 @@ def build_svg(panels, title: str) -> str:
         )
         metric_legend_y = panel_y + 62
         for label, dash in (
-            ("items_per_second", None),
-            ("read_ops", "7 4"),
-            ("write_ops", "2.5 3.5"),
+            ("read_ops", None),
+            ("write_ops", write_dash),
         ):
             line_attrs = ""
+            line_cap = "round"
             if dash is not None:
                 line_attrs = f' stroke-dasharray="{dash}"'
+                line_cap = "butt"
             svg.append(
                 f'<line x1="{legend_x}" y1="{metric_legend_y}" x2="{legend_x + 16}" y2="{metric_legend_y}" '
-                f'stroke="#111827" stroke-width="2.25" stroke-linecap="round"{line_attrs} />'
+                f'stroke="#111827" stroke-width="2.25" stroke-linecap="{line_cap}"{line_attrs} />'
             )
             svg.append(
                 f'<text class="legend" x="{legend_x + 24}" y="{metric_legend_y + 4}">{escape_text(label)}</text>'
@@ -351,55 +356,47 @@ def build_svg(panels, title: str) -> str:
             color = PALETTE[series_index % len(PALETTE)]
             has_read_points = any(point["read_ops"] > 0.0 for point in series["points"])
             has_write_points = any(point["write_ops"] > 0.0 for point in series["points"])
-            item_points = [
-                (
-                    map_x(point["thread"], min_thread, max_thread, plot_x, plot_w),
-                    map_y(point["items_per_second"], items_y_max, plot_y, plot_h),
-                )
-                for point in series["points"]
-            ]
             read_points = [
                 (
                     map_x(point["thread"], min_thread, max_thread, plot_x, plot_w),
-                    map_y(point["read_ops"], ops_y_max, plot_y, plot_h),
+                    map_y(point["read_ops"], left_y_max, plot_y, plot_h),
                 )
                 for point in series["points"]
             ]
             write_points = [
                 (
                     map_x(point["thread"], min_thread, max_thread, plot_x, plot_w),
-                    map_y(point["write_ops"], ops_y_max, plot_y, plot_h),
+                    offset_plot_y(
+                        map_y(point["write_ops"], right_y_max, plot_y, plot_h),
+                        write_offset_px,
+                        plot_y,
+                        plot_h,
+                    ),
                 )
                 for point in series["points"]
             ]
-            if len(item_points) >= 2:
-                polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in item_points)
-                svg.append(
-                    f'<polyline points="{polyline}" fill="none" stroke="{color}" '
-                    'stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" />'
-                )
             if has_read_points and len(read_points) >= 2:
                 polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in read_points)
                 svg.append(
                     f'<polyline points="{polyline}" fill="none" stroke="{color}" '
-                    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" '
-                    'stroke-dasharray="7 4" />'
+                    'stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" />'
                 )
             if has_write_points and len(write_points) >= 2:
                 polyline = " ".join(f"{x:.1f},{y:.1f}" for x, y in write_points)
                 svg.append(
-                    f'<polyline points="{polyline}" fill="none" stroke="{color}" '
-                    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" '
-                    'stroke-dasharray="2.5 3.5" />'
+                    f'<polyline points="{polyline}" fill="none" stroke="{plot_bg_fill}" '
+                    f'stroke-width="4.5" stroke-linecap="butt" stroke-linejoin="round" '
+                    f'stroke-dasharray="{write_dash}" />'
                 )
-            for x, y in item_points:
                 svg.append(
-                    f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.5" fill="{color}" stroke="#ffffff" stroke-width="1" />'
+                    f'<polyline points="{polyline}" fill="none" stroke="{color}" '
+                    f'stroke-width="2.25" stroke-linecap="butt" stroke-linejoin="round" '
+                    f'stroke-dasharray="{write_dash}" />'
                 )
             if has_read_points:
                 for x, y in read_points:
                     svg.append(
-                        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3" fill="#ffffff" stroke="{color}" stroke-width="1.5" />'
+                        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.5" fill="{color}" stroke="#ffffff" stroke-width="1" />'
                     )
             if has_write_points:
                 for x, y in write_points:
