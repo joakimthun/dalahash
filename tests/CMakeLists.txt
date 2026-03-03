@@ -10,14 +10,16 @@ FetchContent_Declare(
 # Make gtest targets (GTest::gtest_main, etc.) available
 FetchContent_MakeAvailable(googletest)
 
-# Unit tests — RESP parser, command dispatch, memcached parser/command, smoke test
+# Unit tests — CLI, asserts, smoke, shared KV, Redis, and memcached
 add_executable(dalahash_tests
+    cli_test.cpp
     base/assert_test.cpp
     smoke_test.cpp
     kv/shared_kv_store_test.cpp
     kv/shared_kv_store_api_test.cpp
     kv/shared_kv_store_concurrency_test.cpp
     kv/shared_kv_store_stress_test.cpp
+    net/server_test.cpp
     redis/resp_test.cpp
     redis/command_test.cpp
     memcached/memcached_parse_test.cpp

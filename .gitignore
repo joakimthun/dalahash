@@ -15,6 +15,14 @@ build-perf/
 build_perf/
 build-mc/
 build_mc/
+build-bench/
+build_bench/
+build-review-echo/
+build_review_echo/
+build-review-redis/
+build_review_redis/
+build-review-v1/
+build_review_v1/
 bench/results/
 *.local.json
 notes.txt

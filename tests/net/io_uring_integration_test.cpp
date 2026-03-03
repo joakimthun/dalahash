@@ -316,6 +316,12 @@ TEST_F(IoUringIntegrationTest, PingRoundTrip) {
     EXPECT_EQ(trim_trailing_line_endings(res.output), "PONG");
 }
 
+TEST_F(IoUringIntegrationTest, PingEchoesSingleArgument) {
+    CommandResult res = client().command({"PING", "hello"});
+    ASSERT_EQ(res.exit_code, 0) << res.output;
+    EXPECT_EQ(trim_trailing_line_endings(res.output), "hello");
+}
+
 TEST_F(IoUringIntegrationTest, SetThenGetAcrossClientCalls) {
     CommandResult set = client().command({"SET", "io_uring:key", "value123"});
     ASSERT_EQ(set.exit_code, 0) << set.output;
@@ -348,6 +354,11 @@ TEST_F(IoUringIntegrationTest, ErrorResponsesSurfaceToClient) {
     CommandResult unknown = client().command({"NOT_A_REAL_COMMAND"});
     ASSERT_EQ(unknown.exit_code, 0) << unknown.output;
     EXPECT_EQ(trim_trailing_line_endings(unknown.output), "ERR unknown command");
+
+    CommandResult ping_arity = client().command({"PING", "a", "b"});
+    ASSERT_EQ(ping_arity.exit_code, 0) << ping_arity.output;
+    EXPECT_TRUE(trim_trailing_line_endings(ping_arity.output)
+                    .starts_with("ERR wrong number of arguments for 'ping' command"));
 }
 
 TEST_F(IoUringIntegrationTest, SetexThenGetRoundTrip) {

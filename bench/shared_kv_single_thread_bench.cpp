@@ -173,8 +173,210 @@ static void BM_SharedKvSingleGetHit(benchmark::State& state) {
     state.SetBytesProcessed(static_cast<int64_t>(bytes));
 }
 
+static void BM_SharedKvSingleGetMiss(benchmark::State& state) {
+    uint32_t dataset_size = 0;
+    uint32_t key_size = 0;
+    uint32_t value_size = 0;
+    if (!parse_sizes(state, &dataset_size, &key_size, &value_size)) {
+        state.SkipWithError("invalid benchmark args");
+        return;
+    }
+
+    KvStoreConfig cfg = {
+        .capacity_bytes = kvbench::derive_capacity_bytes(dataset_size, key_size, value_size),
+        .shard_count = 0,
+        .buckets_per_shard = 0,
+        .worker_count = 1,
+    };
+    KvStore* store = kv_store_create(&cfg);
+    if (!store) {
+        state.SkipWithError("kv_store_create failed");
+        return;
+    }
+    if (kv_store_register_worker(store, 0) != 0) {
+        kv_store_destroy(store);
+        state.SkipWithError("kv_store_register_worker failed");
+        return;
+    }
+
+    const std::vector<std::string> miss_keys =
+        kvbench::make_corpus(dataset_size, key_size, 0x73696e676c655f35ull, true);
+
+    uint32_t idx = 0;
+    uint64_t now_ms = 1;
+    uint64_t bytes = 0;
+    for (auto _ : state) {
+        (void)_;
+        KvValueView out = {};
+        const std::string& k = miss_keys[idx];
+        KvGetStatus gs = kv_store_get(store, 0, k, now_ms, &out);
+        if (gs != KvGetStatus::MISS) {
+            state.SkipWithError("kv_store_get hit in miss benchmark");
+            break;
+        }
+
+        benchmark::DoNotOptimize(out.data);
+        benchmark::DoNotOptimize(out.len);
+        bytes += static_cast<uint64_t>(k.size());
+        now_ms++;
+        idx++;
+        if (idx == dataset_size)
+            idx = 0;
+    }
+
+    kv_store_quiescent(store, 0);
+    kv_store_destroy(store);
+
+    state.SetItemsProcessed(static_cast<int64_t>(state.iterations()));
+    state.SetBytesProcessed(static_cast<int64_t>(bytes));
+}
+
+static void BM_SharedKvSingleDeleteHit(benchmark::State& state) {
+    uint32_t dataset_size = 0;
+    uint32_t key_size = 0;
+    uint32_t value_size = 0;
+    if (!parse_sizes(state, &dataset_size, &key_size, &value_size)) {
+        state.SkipWithError("invalid benchmark args");
+        return;
+    }
+
+    KvStoreConfig cfg = {
+        .capacity_bytes = kvbench::derive_capacity_bytes(dataset_size, key_size, value_size),
+        .shard_count = 0,
+        .buckets_per_shard = 0,
+        .worker_count = 1,
+    };
+    KvStore* store = kv_store_create(&cfg);
+    if (!store) {
+        state.SkipWithError("kv_store_create failed");
+        return;
+    }
+    if (kv_store_register_worker(store, 0) != 0) {
+        kv_store_destroy(store);
+        state.SkipWithError("kv_store_register_worker failed");
+        return;
+    }
+
+    const std::vector<std::string> keys =
+        kvbench::make_corpus(dataset_size, key_size, 0x73696e676c655f36ull, true);
+    const std::vector<std::string> values =
+        kvbench::make_corpus(dataset_size, value_size, 0x73696e676c655f37ull, false);
+
+    uint64_t preload_now = 1;
+    for (uint32_t i = 0; i < dataset_size; i++) {
+        KvSetStatus st = kv_store_set(store, 0, keys[i], values[i], preload_now++, nullptr);
+        if (st != KvSetStatus::OK) {
+            kv_store_destroy(store);
+            state.SkipWithError("preload kv_store_set failed");
+            return;
+        }
+    }
+    kv_store_quiescent(store, 0);
+
+    uint32_t idx = 0;
+    uint64_t now_ms = preload_now;
+    uint64_t bytes = 0;
+    for (auto _ : state) {
+        (void)_;
+        const std::string& k = keys[idx];
+        const std::string& v = values[idx];
+        KvDeleteStatus ds = kv_store_delete(store, 0, k, now_ms);
+        if (ds != KvDeleteStatus::OK) {
+            state.SkipWithError("kv_store_delete missed in delete benchmark");
+            break;
+        }
+
+        bytes += static_cast<uint64_t>(k.size());
+        benchmark::DoNotOptimize(ds);
+        now_ms++;
+
+        state.PauseTiming();
+        KvSetStatus st = kv_store_set(store, 0, k, v, now_ms, nullptr);
+        if (st != KvSetStatus::OK) {
+            state.SkipWithError("kv_store_set restore failed");
+            state.ResumeTiming();
+            break;
+        }
+        state.ResumeTiming();
+
+        now_ms++;
+        idx++;
+        if (idx == dataset_size)
+            idx = 0;
+    }
+
+    kv_store_quiescent(store, 0);
+    kv_store_destroy(store);
+
+    state.SetItemsProcessed(static_cast<int64_t>(state.iterations()));
+    state.SetBytesProcessed(static_cast<int64_t>(bytes));
+}
+
+static void BM_SharedKvSingleSetWithTtl(benchmark::State& state) {
+    uint32_t dataset_size = 0;
+    uint32_t key_size = 0;
+    uint32_t value_size = 0;
+    if (!parse_sizes(state, &dataset_size, &key_size, &value_size)) {
+        state.SkipWithError("invalid benchmark args");
+        return;
+    }
+
+    KvStoreConfig cfg = {
+        .capacity_bytes = kvbench::derive_capacity_bytes(dataset_size, key_size, value_size),
+        .shard_count = 0,
+        .buckets_per_shard = 0,
+        .worker_count = 1,
+    };
+    KvStore* store = kv_store_create(&cfg);
+    if (!store) {
+        state.SkipWithError("kv_store_create failed");
+        return;
+    }
+    if (kv_store_register_worker(store, 0) != 0) {
+        kv_store_destroy(store);
+        state.SkipWithError("kv_store_register_worker failed");
+        return;
+    }
+
+    const std::vector<std::string> keys =
+        kvbench::make_corpus(dataset_size, key_size, 0x73696e676c655f38ull, true);
+    const std::vector<std::string> values =
+        kvbench::make_corpus(dataset_size, value_size, 0x73696e676c655f39ull, false);
+    const KvSetOptions opts = {.mode = KvExpireMode::AFTER_MS, .value_ms = 1000};
+
+    uint32_t idx = 0;
+    uint64_t now_ms = 1;
+    uint64_t bytes = 0;
+    for (auto _ : state) {
+        (void)_;
+        const std::string& k = keys[idx];
+        const std::string& v = values[idx];
+        KvSetStatus st = kv_store_set(store, 0, k, v, now_ms, &opts);
+        if (st != KvSetStatus::OK) {
+            state.SkipWithError("kv_store_set with ttl failed");
+            break;
+        }
+
+        benchmark::DoNotOptimize(st);
+        bytes += static_cast<uint64_t>(k.size() + v.size());
+        now_ms++;
+        idx++;
+        if (idx == dataset_size)
+            idx = 0;
+    }
+
+    kv_store_quiescent(store, 0);
+    kv_store_destroy(store);
+
+    state.SetItemsProcessed(static_cast<int64_t>(state.iterations()));
+    state.SetBytesProcessed(static_cast<int64_t>(bytes));
+}
+
 BENCHMARK(BM_SharedKvSingleSet)->Apply(add_all_args)->UseRealTime();
 BENCHMARK(BM_SharedKvSingleGetHit)->Apply(add_all_args)->UseRealTime();
+BENCHMARK(BM_SharedKvSingleGetMiss)->Apply(add_all_args)->UseRealTime();
+BENCHMARK(BM_SharedKvSingleDeleteHit)->Apply(add_all_args)->UseRealTime();
+BENCHMARK(BM_SharedKvSingleSetWithTtl)->Apply(add_all_args)->UseRealTime();
 
 } // namespace
 

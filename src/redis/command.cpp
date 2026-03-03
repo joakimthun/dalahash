@@ -141,12 +141,21 @@ uint32_t command_execute(const RespCommand* cmd, Store* store, uint64_t now_ms, 
     }
 
     if (arg_matches(verb, "PING", 4)) {
-        if (out_buf_size < 7)
-            return write_error_bounded(out_buf, out_buf_size, "output buffer too small");
-        return resp_write_pong(out_buf);
+        if (cmd->argc == 1) {
+            if (out_buf_size < 7)
+                return write_error_bounded(out_buf, out_buf_size, "output buffer too small");
+            return resp_write_pong(out_buf);
+        }
+        if (cmd->argc != 2)
+            return write_error_bounded(out_buf, out_buf_size, "wrong number of arguments for 'ping' command");
+
+        const RespArg* msg = &cmd->args[1];
+        uint64_t needed = 1ull + decimal_len_u32(msg->len) + 2ull + msg->len + 2ull;
+        if (needed > out_buf_size)
+            return write_error_bounded(out_buf, out_buf_size, "response too large");
+        return resp_write_bulk(out_buf, msg->data, msg->len);
     }
 
-    // Stub for redis-cli handshake — returns empty array.
     if (arg_matches(verb, "COMMAND", 7)) {
         if (out_buf_size < 4)
             return write_error_bounded(out_buf, out_buf_size, "output buffer too small");

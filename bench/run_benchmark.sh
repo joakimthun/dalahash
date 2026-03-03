@@ -19,6 +19,7 @@ DISTINCT_CLIENT_SEED=""
 BINARY=""
 SETEX_MODE=""
 MEMCACHED_MODE=""
+NETCAT_BIN=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -90,16 +91,32 @@ check_command() {
     fi
 }
 
+find_netcat() {
+    if command -v nc &>/dev/null; then
+        echo "nc"
+        return 0
+    fi
+    if command -v netcat &>/dev/null; then
+        echo "netcat"
+        return 0
+    fi
+    return 1
+}
+
 check_command memtier_benchmark \
     "Install: sudo apt install memtier  OR  see https://github.com/RedisLabs/memtier_benchmark"
-if [[ -z "$MEMCACHED_MODE" ]]; then
+if [[ -n "$MEMCACHED_MODE" ]]; then
+    if ! NETCAT_BIN="$(find_netcat)"; then
+        die "memcached mode requires netcat (nc or netcat). Install: sudo apt install netcat-openbsd"
+    fi
+else
     check_command redis-cli \
         "Install: sudo apt install redis-tools"
 fi
 
 # ── Build if no binary provided ──────────────────────────────────────────────
-# Pin Redis protocol, Release mode, no sanitizers. Uses a fresh build dir to
-# guarantee no stale cache state leaks in from prior configurations.
+# Pin the selected protocol, Release mode, and no sanitizers. Uses a fresh
+# build dir to guarantee no stale cache state leaks in from prior configurations.
 if [[ -z "$BINARY" ]]; then
     if [[ -n "$MEMCACHED_MODE" ]]; then
         BENCH_PROTOCOL="memcached"
@@ -175,7 +192,7 @@ for i in $(seq 1 50); do
         die "dalahash exited immediately (PID $SERVER_PID). Check binary, port, or environment."
     fi
     if [[ -n "$MEMCACHED_MODE" ]]; then
-        if printf "version\r\n" | nc -q 1 127.0.0.1 "$PORT" 2>/dev/null | grep -q VERSION; then
+        if printf "version\r\n" | "$NETCAT_BIN" -q 1 127.0.0.1 "$PORT" 2>/dev/null | grep -q VERSION; then
             echo " ready."
             break
         fi

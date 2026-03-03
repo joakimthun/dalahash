@@ -1,52 +1,56 @@
 # AGENTS.md
 
-## Project (first version)
+## Project
 
-- The project is called dalahash - a C++ in-memory data store.
-- It should be compatible with the basic Redis commands (using a standard Redis client) GET and SET.
-- The emphasis is always on performance.
-- The goal is to run dalahash at hardware capacity.
+- `dalahash` is a C++ in-memory data store.
+- The project targets high-throughput, low-latency operation and is tuned to run close to hardware limits.
+- Transport is a thread-per-core `io_uring` server.
+- Protocol support is compile-time selected.
 
-### Current implemented command surface
+### Current command surface
 
 Redis mode:
-- GET
-- SET
-- SETEX
-- PING
-- COMMAND (stub used by redis-cli handshake; returns `*0\r\n`)
+
+- `GET`
+- `SET`
+- `SETEX`
+- `PING`
+  - `PING` returns `PONG`
+  - `PING <message>` echoes the message as a bulk string
+- `COMMAND` (stub for `redis-cli`; returns `*0\r\n`)
 
 Memcached mode (text protocol):
-- Legacy: get, set, delete, version
-- Meta: mg (meta get), ms (meta set), md (meta delete)
-- Client flags preserved via 4-byte big-endian value prefix
-- noreply/quiet mode support
+
+- Legacy: `get`, `set`, `delete`, `version`
+- Meta: `mg`, `ms`, `md`, `mn`
+- Client flags are preserved via a 4-byte big-endian value prefix
+- `noreply` / quiet mode is supported where implemented
 
 Echo mode:
-- Raw TCP echo (server writes back the exact bytes received).
 
-## Rules & Standards
+- Raw TCP echo
 
-- Use cmake.
-- Use clang-21 to compile.
-- Use `clang-format-21` (or `clang-format` if it resolves to LLVM 21) with the repo-root `.clang-format` for all C++ source/header changes.
-- Tests should be written with gtest.
+## Rules And Standards
+
+- Use CMake.
+- Use `clang-21` / `clang++-21`.
+- Use `clang-format-21` (or `clang-format` if it resolves to LLVM 21) with the repo-root `.clang-format`.
+- Tests use gtest.
 - Use C++23 (`CMAKE_CXX_STANDARD 23`).
 - Do not use exceptions for error handling (`-fno-exceptions`).
-- Prefer simple C-style code when possible. Avoid complex C++ features when not needed, and avoid templates as much as possible.
-- Always use C++ style casts (`static_cast`, `reinterpret_cast`, `const_cast`) instead of C-style casts (`(Type)expr`).
-- The system should be tested with deterministic simulation testing (DST).
-- Use `ASSERT(...)` / `ASSERT_FMT(...)` for internal invariants that must always hold.
-- When adding new invariants, add debug asserts at the point of assumption in `src/`.
-- Keep external input/IO/runtime error handling as normal return/error paths; assertions are for logic/state invariants.
-- After any C++ code or comment change, run formatting before handing work off; code and comments must match the root `.clang-format`.
+- Prefer simple code and avoid unnecessary templates or complex abstractions.
+- Use C++ casts (`static_cast`, `reinterpret_cast`, `const_cast`) instead of C-style casts.
+- Use DST (deterministic simulation testing) for transport logic.
+- Use `ASSERT(...)` / `ASSERT_FMT(...)` for internal invariants.
+- Add invariants where assumptions are made inside `src/`.
+- Keep external input, IO, and runtime failures as normal error-return paths.
+- After any C++ code or comment change, run formatting before handing work off.
 
 ## Comments
 
 - Keep comments concise.
-- Only comment code that is not already obvious.
-- Add inline comments only for non-obvious logic: bit tricks, io_uring behavior, syscalls, performance rationale, and architecture decisions.
-- Prefer // over or /* */ whenever possible
+- Comment only non-obvious logic, performance rationale, syscall behavior, or architecture constraints.
+- Prefer `//` comments.
 
 ## Prerequisites
 
@@ -54,370 +58,387 @@ Echo mode:
 # Core build/runtime deps (Ubuntu/Debian names)
 sudo apt install cmake clang-21 clang-format-21 liburing-dev
 
-# Needed for real network integration tests and manual Redis-client checks
+# Real Redis integration tests and manual Redis checks
 sudo apt install redis-tools
+
+# End-to-end benchmark helper
+sudo apt install memtier
+
+# Memcached benchmark readiness checks
+sudo apt install netcat-openbsd
 ```
 
 ## Build
 
 ```bash
 # Debug
-cmake -B build -DCMAKE_C_COMPILER=clang-21 -DCMAKE_CXX_COMPILER=clang++-21 -DCMAKE_BUILD_TYPE=Debug
-cmake --build build -j$(nproc)
+cmake -B build \
+  -DCMAKE_C_COMPILER=clang-21 \
+  -DCMAKE_CXX_COMPILER=clang++-21 \
+  -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j"$(nproc)"
 
 # Release
-cmake -B build -DCMAKE_C_COMPILER=clang-21 -DCMAKE_CXX_COMPILER=clang++-21 -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
+cmake -B build \
+  -DCMAKE_C_COMPILER=clang-21 \
+  -DCMAKE_CXX_COMPILER=clang++-21 \
+  -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j"$(nproc)"
 ```
 
-Protocol selection is compile-time via CMake cache var:
+Protocol selection is compile-time via CMake cache variable:
+
 - `-DDALAHASH_PROTOCOL=redis` (default)
 - `-DDALAHASH_PROTOCOL=memcached`
 - `-DDALAHASH_PROTOCOL=echo`
 
+Shared KV implementation selection is separate:
+
+- `-DDALAHASH_KV_IMPL=v1`
+- `-DDALAHASH_KV_IMPL=v2` (default)
+
+Optional build toggles:
+
+- `-DENABLE_ASAN=ON`
+- `-DENABLE_LSAN=ON`
+- `-DENABLE_BENCHMARKS=ON`
+
 ## Formatting
 
 ```bash
-# Format all C/C++ source and header files tracked by the project
+# Format all tracked C/C++ sources
 cmake --build build --target format
 
 # Format specific files directly
 clang-format-21 -i src/foo.cpp src/foo.h
 ```
 
-## Run Server (all supported CLI modes)
+## Run Server
 
 ```bash
-# Default: port 6379, workers = online CPU count
+# Default: port 6379, workers = online CPU count, store = 256 MiB
 ./build/dalahash
 
 # Custom port
 ./build/dalahash --port 6380
 
+# Auto worker detection (same as default)
+./build/dalahash --workers 0
+
 # Custom worker count
 ./build/dalahash --workers 1
 
-# Custom port + workers
-./build/dalahash --port 6380 --workers 1
+# Custom shared store capacity
+./build/dalahash --store-bytes $((512 * 1024 * 1024))
+
+# Custom port + workers + store capacity
+./build/dalahash --port 6380 --workers 1 --store-bytes $((128 * 1024 * 1024))
 
 # Help
 ./build/dalahash --help
 ```
 
-Important: in Redis mode, each worker has its own in-memory `Store` in v1 (not shared). For predictable key visibility across clients, use `--workers 1`.
+CLI notes:
 
-## Quick manual client check
+- `--workers 0` means auto-detect from `_SC_NPROCESSORS_ONLN`.
+- Invalid `--workers`, `--port`, and `--store-bytes` values fail fast with exit code `1`.
+
+## Quick Manual Client Checks
+
+Redis mode:
 
 ```bash
 redis-cli -h 127.0.0.1 -p 6379 PING
+redis-cli -h 127.0.0.1 -p 6379 PING hello
 redis-cli -h 127.0.0.1 -p 6379 SET foo bar
 redis-cli -h 127.0.0.1 -p 6379 GET foo
 ```
 
-## AddressSanitizer (ASan)
+Memcached mode:
 
 ```bash
-# Build with ASan (use Debug for best stack traces)
-cmake -B build -DCMAKE_C_COMPILER=clang-21 -DCMAKE_CXX_COMPILER=clang++-21 \
-      -DCMAKE_BUILD_TYPE=Debug -DENABLE_ASAN=ON
-cmake --build build -j$(nproc)
+printf "version\r\n" | nc -q 1 127.0.0.1 6379
+printf "set k 0 0 3\r\nfoo\r\nget k\r\n" | nc -q 1 127.0.0.1 6379
+printf "mn\r\n" | nc -q 1 127.0.0.1 6379
+```
 
-# Run tests under ASan
+## AddressSanitizer
+
+```bash
+cmake -B build \
+  -DCMAKE_C_COMPILER=clang-21 \
+  -DCMAKE_CXX_COMPILER=clang++-21 \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DENABLE_ASAN=ON
+cmake --build build -j"$(nproc)"
 ctest --test-dir build --output-on-failure
-
-# Run server under ASan - LeakSanitizer reports on exit (Ctrl+C)
 ./build/dalahash --workers 1
 ```
 
-## LeakSanitizer (LSan, standalone)
+## LeakSanitizer
 
 ```bash
-# Build with standalone LeakSanitizer
-cmake -B build -DCMAKE_C_COMPILER=clang-21 -DCMAKE_CXX_COMPILER=clang++-21 \
-      -DCMAKE_BUILD_TYPE=Debug -DENABLE_LSAN=ON
-cmake --build build -j$(nproc)
-
-# Run tests with leak detection
+cmake -B build \
+  -DCMAKE_C_COMPILER=clang-21 \
+  -DCMAKE_CXX_COMPILER=clang++-21 \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DENABLE_LSAN=ON
+cmake --build build -j"$(nproc)"
 ctest --test-dir build --output-on-failure
-
-# Run server (leak report is emitted on clean exit)
 ./build/dalahash --workers 1
 ```
 
-## Tests (all supported ways)
+## Benchmarks
+
+Build benchmark targets:
+
+```bash
+cmake -B build \
+  -DCMAKE_C_COMPILER=clang-21 \
+  -DCMAKE_CXX_COMPILER=clang++-21 \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DENABLE_BENCHMARKS=ON
+cmake --build build -j"$(nproc)" --target \
+  shared_kv_single_thread_bench \
+  shared_kv_multi_thread_bench \
+  redis_resp_bench \
+  memcached_protocol_bench
+```
+
+Run benchmark binaries:
+
+```bash
+./build/bench/shared_kv_single_thread_bench
+./build/bench/shared_kv_multi_thread_bench
+./build/bench/redis_resp_bench
+./build/bench/memcached_protocol_bench
+```
+
+End-to-end benchmark helper:
+
+```bash
+# Redis mode
+bash bench/run_benchmark.sh
+
+# Memcached mode
+bash bench/run_benchmark.sh --memcached
+
+# CMake wrapper target (requires redis or memcached protocol build)
+cmake --build build --target e2e_benchmark
+```
+
+## Tests
 
 ```bash
 # Build tests
-cmake --build build -j$(nproc)
+cmake --build build -j"$(nproc)"
 
-# List discovered tests
+# List tests
 ctest --test-dir build -N
 
 # Run everything
 ctest --test-dir build --output-on-failure
 ```
 
-### Run test categories via CTest regex
+### Useful CTest filters
 
 ```bash
-# Smoke + RESP parser + command unit tests
-ctest --test-dir build --output-on-failure -R '^(Smoke|Resp|Command)\.'
+# CLI + server + smoke + Redis unit tests
+ctest --test-dir build --output-on-failure -R '^(Cli|Server|Smoke|Resp|Command)\.'
 
-# DST unit tests (simulated backend)
-ctest --test-dir build --output-on-failure -R '^DST\.'
+# Shared KV unit/concurrency tests
+ctest --test-dir build --output-on-failure -R '^SharedKv\.'
 
-# DST integration tests (worker_run + SimIoBackend)
-ctest --test-dir build --output-on-failure -R '^DSTIntegration\.'
+# DST tests (Redis protocol build)
+ctest --test-dir build --output-on-failure -R '^(DST|DSTIntegration)\.'
 
-# Echo DST tests (echo protocol build)
-ctest --test-dir build --output-on-failure -R '^EchoDST\.'
-
-# Real io_uring Redis integration tests (redis protocol build; uses redis-cli)
+# Redis io_uring integration tests
 ctest --test-dir build --output-on-failure -R '^IoUringIntegrationTest\.'
 
-# Real echo integration tests (echo protocol build)
+# Redis fuzz tests
+ctest --test-dir build --output-on-failure -R '^Fuzz\.'
+
+# Echo DST tests
+ctest --test-dir build --output-on-failure -R '^EchoDST\.'
+
+# Echo integration tests
 ctest --test-dir build --output-on-failure -R '^EchoIntegrationTest\.'
 
 # Memcached parser + command unit tests
 ctest --test-dir build --output-on-failure -R '^(McParse|McCommand)\.'
 
-# DST memcached tests (memcached protocol build)
+# Memcached DST tests
 ctest --test-dir build --output-on-failure -R '^DSTMemcached\.'
 
-# Real memcached integration tests (memcached protocol build)
+# Memcached integration tests
 ctest --test-dir build --output-on-failure -R '^MemcachedIntegration\.'
 
-# Memcached fuzz tests (memcached protocol build)
+# Memcached fuzz tests
 ctest --test-dir build --output-on-failure -R '^MemcachedFuzz\.'
-
-# Single test example
-ctest --test-dir build --output-on-failure -R '^DSTIntegration\.SendFailClosesConnection$'
 ```
 
-### Run test binaries directly
+### Test binaries
 
 ```bash
-# Unit tests (smoke, RESP, command, memcached parser/command)
+# Always built
 ./build/tests/dalahash_tests
 
-# DST tests (unit + integration against SimIoBackend)
+# Redis protocol build
 ./build/tests/dst_tests
-
-# Real io_uring integration tests
 ./build/tests/io_uring_integration_tests
+./build/tests/fuzz_tests
 
-# Echo integration tests (echo protocol build)
+# Echo protocol build
+./build/tests/dst_echo_tests
 ./build/tests/echo_integration_tests
 
-# DST memcached tests (memcached protocol build)
+# Memcached protocol build
 ./build/tests/dst_memcached_tests
-
-# Memcached integration tests (memcached protocol build)
 ./build/tests/memcached_integration_tests
-
-# Memcached fuzz tests (memcached protocol build)
 ./build/tests/memcached_fuzz_tests
-
-# Example gtest filter
-./build/tests/dst_tests --gtest_filter='DSTIntegration.*'
 ```
 
 Notes:
-- `io_uring_integration_tests` require `redis-cli` in `PATH` and a compatible Linux/io_uring environment.
-- Those tests self-skip when io_uring backend support is unavailable in the environment.
+
+- `io_uring_integration_tests` require `redis-cli` and a compatible Linux `io_uring` environment.
+- Integration tests self-skip when the runtime kernel/environment does not support the required backend.
 
 ## Architecture
 
 ### Thread-per-core model
 
 Each worker thread is pinned to one CPU core (`pthread_setaffinity_np`). Each worker owns:
-- One `io_uring` ring (never shared - `IORING_SETUP_SINGLE_ISSUER`).
-- One listen socket with `SO_REUSEPORT`.
-- One flat `Connection *conns[MAX_CONNECTIONS]` table indexed by fixed file index.
-- One protocol state object (`ProtocolWorkerState`).
-  - In current Redis build, `ProtocolWorkerState` contains one per-thread `Store` (no locks in v1).
 
-`server.cpp` spawns `N` worker threads (default: one per online CPU via `sysconf(_SC_NPROCESSORS_ONLN)`), each running `worker_run()`.
+- One `io_uring` ring (`IORING_SETUP_SINGLE_ISSUER`)
+- One listen socket with `SO_REUSEPORT`
+- One `Connection* conns[MAX_CONNECTIONS]` table indexed by fixed-file index
+- One protocol worker state object
+
+`server.cpp` creates one shared `KvStore` in `server_start()` and passes that shared store to every worker. In Redis and memcached builds, `protocol_worker_init(...)` binds each worker's local `Store` wrapper to that shared `KvStore` and registers the worker id, so keys are visible across workers.
+
+### Protocol seam
+
+`src/protocol/protocol.h` is the compile-time selection point used by `worker.cpp`.
+
+- `DALAHASH_PROTOCOL_REDIS=1`
+- `DALAHASH_PROTOCOL_MEMCACHED=1`
+- `DALAHASH_PROTOCOL_ECHO=1`
+
+Worker hot paths call:
+
+- `protocol_parse(...)`
+- `protocol_execute(...)`
+- `protocol_worker_init(...)`
 
 ### io_uring setup flags
 
-`IORING_SETUP_COOP_TASKRUN` - disables IPI delivery; task work only runs when we enter the kernel.
-`IORING_SETUP_DEFER_TASKRUN` - defers CQE delivery until completions are explicitly requested.
-`IORING_SETUP_SINGLE_ISSUER` - only the owning thread may submit SQEs.
-`IORING_SETUP_SUBMIT_ALL` - continue SQ batch submission past individual SQE failures.
-`IORING_SETUP_CQSIZE` - sets CQ depth to `4 * ring_size`.
+- `IORING_SETUP_COOP_TASKRUN`
+- `IORING_SETUP_DEFER_TASKRUN`
+- `IORING_SETUP_SINGLE_ISSUER`
+- `IORING_SETUP_SUBMIT_ALL`
+- `IORING_SETUP_CQSIZE`
 
-Constants in `server.cpp`: `RING_SIZE=4096`, `BUF_COUNT=1024`, `BUF_SIZE=4096`.
+Current startup constants in `src/net/server.cpp`:
 
-### Multishot operations and rearm
-
-Accept and recv use multishot SQEs (one submission -> many CQEs).
-`IORING_CQE_F_MORE` in `cqe->flags` means the SQE is still armed; when absent, worker must resubmit. This is surfaced as `IoCompletion::more`.
+- `RING_SIZE = 4096`
+- `BUF_COUNT = 1024`
+- `BUF_SIZE = 4096`
 
 ### Fixed file table
 
-`io_uring_register_files_sparse(MAX_CONNECTIONS)` pre-registers `MAX_CONNECTIONS=65536` empty slots.
-`io_uring_prep_multishot_accept_direct` fills slots automatically (`IORING_FILE_INDEX_ALLOC`). On completion, `cqe->res` is the fixed file index (not an OS fd).
-All recv/send SQEs use `IOSQE_FIXED_FILE`.
-`io_uring_prep_close_direct` releases fixed-file slot + socket.
+- `io_uring_register_files_sparse(MAX_CONNECTIONS)` pre-registers the fixed file table.
+- `io_uring_prep_multishot_accept_direct(..., IORING_FILE_INDEX_ALLOC)` allocates fixed-file slots directly.
+- Accept completions return the fixed-file index, not the OS fd.
+- Send/recv submissions use `IOSQE_FIXED_FILE`.
+- `io_uring_prep_close_direct` closes the socket and releases the slot.
 
-### Ring fd registration
+### Receive path
 
-`io_uring_register_ring_fd` registers the ring fd so later `io_uring_enter` calls avoid ring-fd `fget` overhead.
+`handle_recv()` in `src/net/worker.cpp`:
 
-### TCP_NODELAY (async via io_uring)
+1. Appends trailing bytes into `conn->input_buf` when a previous command was incomplete.
+2. Repeatedly calls `protocol_parse()` and `protocol_execute()` until parse returns `INCOMPLETE` or `ERROR`.
+3. Copies each response directly into the per-connection TX queue via `tx_enqueue(...)`.
+4. Preserves incomplete trailing bytes for the next recv.
+5. Closes the connection on parse or protocol error.
+6. Rearms recv when multishot terminates.
+7. Recycles provided buffers after processing.
 
-`io_uring_prep_cmd_sock` with `SOCKET_URING_OP_SETSOCKOPT` sets `TCP_NODELAY` asynchronously using `IOSQE_FIXED_FILE`.
-Requires kernel 6.7+ / liburing 2.7+.
-The optval pointer (`g_tcp_nodelay_on`) must be `static`.
-Completion is encoded as `IoCompletion::IGNORE` and consumed silently in `uring_wait`.
+### TX queue
 
-### CQ overflow detection
+- Responses are never sent from stack memory.
+- Each connection owns a FIFO queue of `TxChunk` buffers.
+- `tx_enqueue(...)` copies protocol output into owned memory.
+- Only one send is in flight per connection.
+- Partial sends advance `tx_head_sent` and resubmit the remaining bytes.
+- `TX_HIGH_WATERMARK_BYTES` is 1 MiB per connection; exceeding it closes the connection.
 
-When `IORING_FEAT_NODROP` is available, overflow CQEs go to kernel backlog instead of dropping.
-`io_uring_cq_has_overflow` is checked after waits to warn when CQ pressure is high.
+### Shared store wrapper
 
-### User data encoding
+`src/store/store.h` is the protocol-facing wrapper around `KvStore`.
 
-SQE `user_data` packs `(kind << 32) | fd`.
-`IGNORE` is used for internal completions (e.g., async TCP_NODELAY).
+- Workers bind to the shared `KvStore` with `store_bind_shared(...)`.
+- Unit tests and protocol-only helpers can still lazily create a local fallback store via `store_ensure_local(...)`.
+- `store_get(...)` / `store_get_at(...)` return `StoreValueView` views into store-owned memory and do not allocate on successful lookups.
 
-### Wait loop: `io_uring_submit_and_wait_timeout`
-
-Used instead of `io_uring_submit_and_wait` because `DEFER_TASKRUN` + timeout path (`IORING_ENTER_EXT_ARG`) is signal-interruptible (`-EINTR`).
-Timeout is 100ms so shutdown flag is checked periodically.
-
-### Provided buffer ring (kernel-managed pool)
-
-`io_uring_register_buf_ring` registers a pre-allocated recv buffer pool.
-Recv SQEs use `IOSQE_BUFFER_SELECT`; completion buffer ID is in `cqe->flags >> IORING_CQE_BUFFER_SHIFT`.
-Worker recycles buffers (batched via `recycle_buffers` when backend supports it).
-
-### DST seam: `IoOps` / `IoBackend`
-
-`src/net/io.h` defines `IoOps` and opaque `IoBackend`.
-For transport I/O, `worker.cpp` only calls through `IoOps` (`submit_*`, `wait`, `recycle_*`).
-Production backend: `src/net/io_uring_backend.cpp`.
-Simulation backend: `tests/net/sim_io_backend.h`.
-
-`SimIoBackend` is an in-process stateful test backend:
-- Tests push scripted `IoCompletion` events into `sim.pending`.
-- `wait()` pops events.
-- `submit_send` captures output per fd for assertions.
-- Failure injection supports ENOSPC and other edge cases.
-
-### Protocol seam (compile-time selected)
-
-`src/protocol/protocol.h` is the protocol selection point used by `worker.cpp`.
-- Selection is compile-time via `DALAHASH_PROTOCOL_*` defines from CMake.
-- Supported selections:
-  - `DALAHASH_PROTOCOL_REDIS=1`
-  - `DALAHASH_PROTOCOL_MEMCACHED=1`
-  - `DALAHASH_PROTOCOL_ECHO=1`
-- Worker hot path calls protocol adapter functions:
-  - `protocol_parse(...)`
-  - `protocol_execute(...)`
-  - `protocol_worker_init(...)`
-
-This keeps the transport layer generic while avoiding runtime virtual dispatch on the per-command path.
-
-### RESP2 protocol (zero-allocation parser)
-
-Redis protocol implementation lives in `src/protocol/redis/redis_protocol.h` and delegates to:
-- `src/redis/resp.cpp` (`resp_parse`)
-- `src/redis/command.cpp` (`command_execute`)
-
-Echo protocol implementation lives in `src/protocol/echo/echo_protocol.h` and treats each recv payload as one message to echo back unchanged.
-
-`src/redis/resp.cpp` keeps `RespArg.data` pointers into the recv buffer (no parse-time copying).
-`resp_parse` returns `OK`, `INCOMPLETE`, or `ERROR`.
-Response formatters write into caller-provided output buffers.
-
-### TCP reassembly + pipeline execution (`handle_recv`)
-
-`handle_recv` in `worker.cpp`:
-1. If `conn->input_len > 0`, append new bytes into `conn->input_buf` (bounded by `CONN_BUF_SIZE`).
-2. Parse loop: `protocol_parse` + `protocol_execute` until `INCOMPLETE` or `ERROR`.
-3. Coalesce multiple command responses from one recv into `response_batch`.
-4. On batch-full, enqueue current batch to TX queue.
-5. On `INCOMPLETE`, preserve trailing bytes in `conn->input_buf`.
-6. On parse error, close connection.
-7. Rearm recv when multishot terminated.
-8. Recycle provided buffers after processing.
-
-### TX queue and async send ownership
-
-Responses are never sent from stack memory.
-Each connection owns a FIFO TX queue (`TxChunk`) with one send in flight at a time:
-- `tx_enqueue` copies response bytes into owned chunk memory.
-- `submit_tx_head` sends the remaining bytes of head chunk.
-- Partial sends advance `tx_head_sent` and resubmit remainder.
-- Completed head chunks are recycled to slab pool classes (`256`, `1024`, `4096`, `16384`) or freed (large allocations).
-- Backpressure limit: `TX_HIGH_WATERMARK_BYTES` (1 MiB per connection). Exceeding it closes the connection.
-
-### Close retry behavior
-
-If `submit_close` returns `-ENOSPC`, fd is queued in pending-close retry list and retried in later loop iterations.
-Only `-ENOSPC` is retried; other close submission errors destroy connection state.
-
-### Key constants
-
-| Constant | Value | Location |
-|---|---|---|
-| `MAX_CONNECTIONS` | 65536 | `src/net/connection.h` |
-| `CONN_BUF_SIZE` | 16384 | `src/net/connection.h` |
-| `RING_SIZE` | 4096 | `src/net/server.cpp` |
-| `BUF_COUNT` | 1024 | `src/net/server.cpp` |
-| `BUF_SIZE` | 4096 | `src/net/server.cpp` |
-| `MAX_COMPLETIONS` | 256 | `src/net/worker.cpp` |
-| `MAX_PENDING_CLOSE` | 256 | `src/net/worker.cpp` |
-| `RESPONSE_BUF_SIZE` | 65536 | `src/net/worker.cpp` |
-| `TX_HIGH_WATERMARK_BYTES` | 1048576 | `src/net/worker.cpp` |
-| `TX_POOL_GROW_BATCH` | 64 | `src/net/worker.cpp` |
-
-### Key files
+## Key Files
 
 | File | Purpose |
 |---|---|
-| `src/main.cpp` | CLI args (`--port`, `--workers`, `--help`) and server entrypoint |
-| `src/net/io.h` | DST seam: `IoOps`, `IoBackend`, `IoCompletion` |
-| `src/net/io_uring_backend.cpp` | Production io_uring backend |
-| `src/net/worker.cpp` | Per-core event loop, reassembly, TX queue, close retry logic |
-| `src/net/server.cpp` | Worker spawning, signal handling |
+| `src/main.cpp` | Main entrypoint |
+| `src/cli.h` | CLI parsing for `--port`, `--workers`, `--store-bytes`, `--help` |
+| `src/net/server.cpp` | Worker startup, shared-store creation, signal handling |
+| `src/net/server.h` | Server config and testable runtime seam |
+| `src/net/worker.cpp` | Per-worker event loop, recv/parse/execute/send path |
+| `src/net/io.h` | `IoOps`, `IoBackend`, `IoCompletion` seam |
+| `src/net/io_uring_backend.cpp` | Production `io_uring` backend |
 | `src/net/connection.h` | Per-connection state |
-| `src/protocol/protocol.h` | Compile-time protocol selection used by worker |
-| `src/protocol/redis/redis_protocol.h` | Redis protocol adapter used by the generic worker |
-| `src/protocol/echo/echo_protocol.h` | Echo protocol adapter used by the generic worker |
-| `src/redis/resp.h/.cpp` | RESP2 parser and response formatters |
-| `src/redis/command.h/.cpp` | Command dispatch (GET, SET, PING, COMMAND stub) |
-| `src/store/store.h` | Shared Store wrapper with get/set/delete helpers |
-| `src/redis/store.h` | Thin redirect to `src/store/store.h` |
-| `src/protocol/memcached/memcached_protocol.h` | Memcached protocol adapter used by the generic worker |
-| `src/memcached/memcached_parse.h/.cpp` | Memcached text protocol parser (legacy + meta) |
-| `src/memcached/memcached_response.h/.cpp` | Memcached response formatters |
-| `src/memcached/memcached_command.h/.cpp` | Memcached command dispatch |
+| `src/protocol/protocol.h` | Compile-time protocol selection |
+| `src/protocol/redis/redis_protocol.h` | Redis adapter |
+| `src/protocol/memcached/memcached_protocol.h` | Memcached adapter |
+| `src/protocol/echo/echo_protocol.h` | Echo adapter |
+| `src/redis/resp.h/.cpp` | RESP2 parser and formatters |
+| `src/redis/command.h/.cpp` | Redis command execution |
+| `src/memcached/memcached_parse.h/.cpp` | Memcached text parser |
+| `src/memcached/memcached_response.h/.cpp` | Memcached response formatting |
+| `src/memcached/memcached_command.h/.cpp` | Memcached command execution |
+| `src/store/store.h` | Protocol-facing store wrapper |
+| `src/kv/shared_kv_store.h` | Shared KV public API |
+| `src/kv/shared_kv_store.cpp` | KV implementation v1 |
+| `src/kv/shared_kv_store_v2.cpp` | KV implementation v2 |
+| `src/kv/shared_kv_store_internal_stats.h` | Internal stats exposed to v2 benchmarks |
+| `src/kv/DESIGN.md` | v1 KV design notes |
+| `src/kv/DESIGN_V2.md` | v2 KV design notes |
+| `tests/CMakeLists.txt` | Test target wiring |
+| `tests/cli_test.cpp` | CLI parser unit tests |
+| `tests/net/server_test.cpp` | Server startup failure tests |
 | `tests/net/sim_io_backend.h` | Simulated backend for DST |
-| `tests/net/dst_test.cpp` | DST unit and DST integration tests |
-| `tests/net/io_uring_integration_test.cpp` | Real network integration tests via redis-cli |
-| `tests/net/dst_echo_test.cpp` | DST tests for echo protocol |
-| `tests/net/echo_integration_test.cpp` | Real network integration tests for echo protocol |
-| `tests/net/dst_memcached_test.cpp` | DST tests for memcached protocol |
-| `tests/net/memcached_integration_test.cpp` | Real network integration tests for memcached protocol |
-| `tests/net/memcached_fuzz_test.cpp` | Fuzz tests for memcached protocol |
+| `tests/net/dst_test.cpp` | Redis DST tests |
+| `tests/net/io_uring_integration_test.cpp` | Redis real-network integration tests |
+| `tests/net/fuzz_test.cpp` | Redis fuzz/integration stress |
+| `tests/net/dst_echo_test.cpp` | Echo DST tests |
+| `tests/net/echo_integration_test.cpp` | Echo integration tests |
+| `tests/net/dst_memcached_test.cpp` | Memcached DST tests |
+| `tests/net/memcached_integration_test.cpp` | Memcached integration tests |
+| `tests/net/memcached_fuzz_test.cpp` | Memcached fuzz tests |
+| `tests/redis/resp_test.cpp` | RESP unit tests |
+| `tests/redis/command_test.cpp` | Redis command unit tests |
 | `tests/memcached/memcached_parse_test.cpp` | Memcached parser unit tests |
-| `tests/memcached/memcached_command_test.cpp` | Memcached command dispatch unit tests |
-| `tests/redis/resp_test.cpp` | RESP parser/formatter unit tests |
-| `tests/redis/command_test.cpp` | Command dispatch unit tests |
-| `tests/smoke_test.cpp` | Build sanity smoke test |
+| `tests/memcached/memcached_command_test.cpp` | Memcached command unit tests |
+| `bench/CMakeLists.txt` | Benchmark target wiring |
+| `bench/shared_kv_single_thread_bench.cpp` | Single-thread shared KV benchmarks |
+| `bench/shared_kv_multi_thread_bench.cpp` | Multi-thread shared KV benchmarks |
+| `bench/redis_resp_bench.cpp` | Redis parse/format/execute benchmarks |
+| `bench/memcached_protocol_bench.cpp` | Memcached parse/format/execute benchmarks |
+| `bench/run_benchmark.sh` | End-to-end memtier benchmark driver |
 
-### Known gotchas
+## Known Gotchas
 
-- `IORING_SETUP_DEFER_TASKRUN` requires `io_uring_submit_and_wait_timeout`; plain `io_uring_submit_and_wait` is not signal-interruptible in this mode.
-- `accept_direct` completion returns fixed file index (`cqe->res`), not OS fd.
-- `g_tcp_nodelay_on` must be `static` because kernel reads it asynchronously.
-- `io_uring_register_ring_fd` should be called last in `uring_init`.
-- `-fno-exceptions` is mandatory (no `try`/`catch`).
-- Protocol is compile-time selected via `DALAHASH_PROTOCOL`; supported values are `redis`, `memcached`, and `echo`.
-- In Redis mode, store is per-worker (inside `ProtocolWorkerState`), not shared. With `--workers > 1`, key visibility depends on which worker accepted each connection.
+- `IORING_SETUP_DEFER_TASKRUN` requires `io_uring_submit_and_wait_timeout`; plain `io_uring_submit_and_wait` is not used here.
+- `accept_direct` completions return fixed-file indices, not OS fds.
+- `g_tcp_nodelay_on` must stay `static` because the kernel reads it asynchronously.
+- `io_uring_register_ring_fd` should be called last during ring setup.
+- `-fno-exceptions` is mandatory.
+- Protocol selection (`DALAHASH_PROTOCOL`) and KV implementation selection (`DALAHASH_KV_IMPL`) are separate build knobs.
+- All workers share one `KvStore`; do not assume per-worker key isolation.
 - Only close-submit `-ENOSPC` is retried; other close-submit failures are treated as terminal.
-- `store_get` uses `std::string(key)` lookup, which allocates on every GET (known inefficiency).

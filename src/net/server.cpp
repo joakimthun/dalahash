@@ -30,7 +30,11 @@ static void signal_handler(int sig) {
 }
 
 static void* worker_thread_fn(void* arg) {
-    worker_run(static_cast<WorkerConfig*>(arg));
+    auto* config = static_cast<WorkerConfig*>(arg);
+    ASSERT(config != nullptr, "worker_thread_fn requires config");
+    if (!config)
+        return nullptr;
+    config->exit_code = worker_run(config);
     return nullptr;
 }
 
@@ -117,9 +121,12 @@ static WorkerResourcePlan plan_worker_resources(int requested_workers) {
     return plan;
 }
 
-int server_start(const ServerConfig* config) {
+int server_start_with_runtime(const ServerConfig* config, const IoOps* ops,
+                              ServerBackendCreateFn backend_create, bool skip_worker_setup) {
     ASSERT(config != nullptr, "server_start requires config");
-    if (!config)
+    ASSERT(ops != nullptr, "server_start requires io ops");
+    ASSERT(backend_create != nullptr, "server_start requires backend factory");
+    if (!config || !ops || !backend_create)
         return 1;
 
     int num_workers = config->num_workers;
@@ -152,19 +159,21 @@ int server_start(const ServerConfig* config) {
 
     std::fprintf(stderr, "dalahash: starting %d workers on port %d\n", num_workers, config->port);
 
-    //  sigaction(2) — install signal handlers for clean shutdown.
-    // sa_flags = 0: deliberately no SA_RESTART. Without SA_RESTART, blocked
-    // syscalls return -EINTR when a signal arrives. This is critical for
-    // io_uring: when io_uring_submit_and_wait_timeout is blocked waiting for
-    // CQEs and SIGINT arrives, the -EINTR return lets the worker thread check
-    // the g_running flag and exit cleanly. With SA_RESTART, the wait would
-    // silently restart and the worker would never see the shutdown signal.
-    struct sigaction sa = {};
-    sa.sa_handler = signal_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    ASSERT(sigaction(SIGINT, &sa, nullptr) == 0, "sigaction(SIGINT) failed");
-    ASSERT(sigaction(SIGTERM, &sa, nullptr) == 0, "sigaction(SIGTERM) failed");
+    if (!skip_worker_setup) {
+        //  sigaction(2) — install signal handlers for clean shutdown.
+        // sa_flags = 0: deliberately no SA_RESTART. Without SA_RESTART, blocked
+        // syscalls return -EINTR when a signal arrives. This is critical for
+        // io_uring: when io_uring_submit_and_wait_timeout is blocked waiting for
+        // CQEs and SIGINT arrives, the -EINTR return lets the worker thread check
+        // the g_running flag and exit cleanly. With SA_RESTART, the wait would
+        // silently restart and the worker would never see the shutdown signal.
+        struct sigaction sa = {};
+        sa.sa_handler = signal_handler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        ASSERT(sigaction(SIGINT, &sa, nullptr) == 0, "sigaction(SIGINT) failed");
+        ASSERT(sigaction(SIGTERM, &sa, nullptr) == 0, "sigaction(SIGTERM) failed");
+    }
 
     g_running.store(true, std::memory_order_relaxed);
 
@@ -192,22 +201,29 @@ int server_start(const ServerConfig* config) {
         return 1;
     }
 
+    int started_workers = 0;
+    bool start_failed = false;
+
     for (int i = 0; i < num_workers; i++) {
         IoBackend* backend =
-            io_uring_backend_create(RING_SIZE, BUF_COUNT, BUF_SIZE, resource_plan.fixed_files_per_worker);
+            backend_create(RING_SIZE, BUF_COUNT, BUF_SIZE, resource_plan.fixed_files_per_worker);
         if (!backend) {
             std::fprintf(stderr, "dalahash: backend create failed for worker %d\n", i);
             g_running.store(false, std::memory_order_relaxed);
+            start_failed = true;
             break;
         }
         configs[i] = {.cpu_id = i,
                       .port = config->port,
-                      .ops = io_uring_ops(),
+                      .ops = *ops,
                       .backend = backend,
                       .running = &g_running,
                       .shared_store = shared_store,
                       .worker_id = static_cast<uint32_t>(i),
-                      .worker_count = static_cast<uint32_t>(num_workers)};
+                      .worker_count = static_cast<uint32_t>(num_workers),
+                      .skip_setup = skip_worker_setup,
+                      .listen_fd = -1,
+                      .exit_code = 0};
 
         int ret = pthread_create(&threads[i], nullptr, worker_thread_fn, &configs[i]);
         if (ret != 0) {
@@ -215,20 +231,28 @@ int server_start(const ServerConfig* config) {
             configs[i].ops.destroy(configs[i].backend);
             configs[i].backend = nullptr;
             g_running.store(false, std::memory_order_relaxed);
+            start_failed = true;
             break;
         }
+        started_workers++;
     }
 
-    for (int i = 0; i < num_workers; i++) {
-        if (threads[i]) {
-            int join_ret = pthread_join(threads[i], nullptr);
-            ASSERT(join_ret == 0, "pthread_join failed");
-        }
+    bool worker_failed = false;
+    for (int i = 0; i < started_workers; i++) {
+        int join_ret = pthread_join(threads[i], nullptr);
+        ASSERT(join_ret == 0, "pthread_join failed");
+        if (configs[i].exit_code != 0)
+            worker_failed = true;
     }
 
     kv_store_destroy(shared_store);
     std::free(configs);
     std::free(threads);
     std::fprintf(stderr, "dalahash: stopped\n");
-    return 0;
+    return (start_failed || worker_failed) ? 1 : 0;
+}
+
+int server_start(const ServerConfig* config) {
+    IoOps ops = io_uring_ops();
+    return server_start_with_runtime(config, &ops, io_uring_backend_create, false);
 }

@@ -138,6 +138,17 @@ TEST(McCommand, MetaSetQuiet) {
     EXPECT_EQ(exec("ms k 3 q\r\nfoo\r\n", &store), "");
 }
 
+TEST(McCommand, MetaSetTooManyFlagsRejected) {
+    Store store;
+    std::string cmd = "ms k 3";
+    for (int i = 0; i < MC_MAX_META_FLAGS; i++)
+        cmd += " x";
+    cmd += " q\r\nfoo\r\n";
+
+    EXPECT_EQ(exec(cmd, &store), "<PARSE_ERROR>");
+    EXPECT_EQ(exec("mg k v\r\n", &store), "EN\r\n");
+}
+
 TEST(McCommand, MetaSetMalformedFlags) {
     Store store;
     // Non-numeric F flag should fail.
@@ -213,6 +224,11 @@ TEST(McCommand, MetaDeleteQuiet) {
     Store store;
     exec("ms k 3\r\nfoo\r\n", &store);
     EXPECT_EQ(exec("md k q\r\n", &store), "");
+}
+
+TEST(McCommand, MetaNoop) {
+    Store store;
+    EXPECT_EQ(exec("mn\r\n", &store), "MN\r\n");
 }
 
 // --- Absolute exptime (> 30 days = epoch timestamp) ---

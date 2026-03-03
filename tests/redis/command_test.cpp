@@ -188,10 +188,21 @@ TEST(Command, SetTooManyArgs) {
     EXPECT_TRUE(result.starts_with("-ERR"));
 }
 
-TEST(Command, PingExtraArgs) {
-    // PING currently ignores argc — verify it still returns PONG.
+TEST(Command, PingWithMessage) {
     Store store;
-    EXPECT_EQ(exec(make_cmd({"PING", "hello"}), &store), "+PONG\r\n");
+    EXPECT_EQ(exec(make_cmd({"PING", "hello"}), &store), "$5\r\nhello\r\n");
+}
+
+TEST(Command, PingEmptyMessage) {
+    Store store;
+    EXPECT_EQ(exec(make_cmd({"PING", ""}), &store), "$0\r\n\r\n");
+}
+
+TEST(Command, PingTooManyArgs) {
+    Store store;
+    std::string result = exec(make_cmd({"PING", "hello", "world"}), &store);
+    EXPECT_TRUE(result.starts_with("-ERR"));
+    EXPECT_NE(result.find("wrong number of arguments"), std::string::npos);
 }
 
 TEST(Command, CommandWithArgs) {
@@ -225,6 +236,29 @@ TEST(Command, OutputBufferExactFitSet) {
     // "+OK\r\n" is 5 bytes; buffer of exactly 5 should work.
     std::string result = exec_sized(make_cmd({"SET", "k", "v"}), &store, 5);
     EXPECT_EQ(result, "+OK\r\n");
+}
+
+TEST(Command, PingBinaryMessage) {
+    Store store;
+    uint8_t msg[] = {'h', 0x00, 'i'};
+
+    RespCommand cmd = {};
+    const char* ping = "PING";
+    cmd.args[0].data = reinterpret_cast<const uint8_t*>(ping);
+    cmd.args[0].len = 4;
+    cmd.args[1].data = msg;
+    cmd.args[1].len = 3;
+    cmd.argc = 2;
+
+    uint8_t buf[4096];
+    uint32_t n = command_execute(&cmd, &store, 12345, buf, sizeof(buf));
+    EXPECT_EQ(std::string(reinterpret_cast<char*>(buf), n), std::string("$3\r\nh\0i\r\n", 9));
+}
+
+TEST(Command, PingMessageBufferTooSmall) {
+    Store store;
+    std::string result = exec_sized(make_cmd({"PING", "hello"}), &store, 3);
+    EXPECT_LE(result.size(), 3u);
 }
 
 TEST(Command, SetOOMReturnsErr) {

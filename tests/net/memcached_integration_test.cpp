@@ -319,6 +319,11 @@ TEST_F(MemcachedIntegrationTest, MetaDeleteRoundTrip) {
     EXPECT_TRUE(resp.find("EN") != std::string::npos);
 }
 
+TEST_F(MemcachedIntegrationTest, MetaNoopRoundTrip) {
+    std::string resp = mc_command(port(), "mn\r\n");
+    EXPECT_EQ(resp, "MN\r\n");
+}
+
 TEST_F(MemcachedIntegrationTest, LargeValue) {
     std::string big(4000, 'Z');
     std::string cmds = "set bigkey 0 0 4000\r\n" + big + "\r\nget bigkey\r\n";

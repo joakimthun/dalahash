@@ -165,6 +165,29 @@ TEST(McParse, MetaGetWithFlags) {
     EXPECT_EQ(cmd.meta_flags[2].data[0], 's');
 }
 
+TEST(McParse, MetaGetMaxFlagsBoundary) {
+    McCommand cmd = {};
+    uint32_t consumed = 0;
+    std::string input = "mg mykey";
+    for (int i = 0; i < MC_MAX_META_FLAGS; i++)
+        input += " f";
+    input += "\r\n";
+
+    EXPECT_EQ(parse(input, &cmd, &consumed), McParseResult::OK);
+    EXPECT_EQ(cmd.meta_flag_count, MC_MAX_META_FLAGS);
+}
+
+TEST(McParse, MetaGetTooManyFlagsRejected) {
+    McCommand cmd = {};
+    uint32_t consumed = 0;
+    std::string input = "mg mykey";
+    for (int i = 0; i < MC_MAX_META_FLAGS + 1; i++)
+        input += " f";
+    input += "\r\n";
+
+    EXPECT_EQ(parse(input, &cmd, &consumed), McParseResult::ERROR);
+}
+
 TEST(McParse, MetaGetIncomplete) {
     McCommand cmd = {};
     uint32_t consumed = 0;
@@ -192,6 +215,17 @@ TEST(McParse, MetaSetWithFlags) {
     EXPECT_EQ(cmd.meta_flag_count, 2);
 }
 
+TEST(McParse, MetaSetTooManyFlagsRejected) {
+    McCommand cmd = {};
+    uint32_t consumed = 0;
+    std::string input = "ms mykey 5";
+    for (int i = 0; i < MC_MAX_META_FLAGS; i++)
+        input += " x";
+    input += " q\r\nhello\r\n";
+
+    EXPECT_EQ(parse(input, &cmd, &consumed), McParseResult::ERROR);
+}
+
 TEST(McParse, MetaSetIncompleteData) {
     McCommand cmd = {};
     uint32_t consumed = 0;
@@ -214,6 +248,17 @@ TEST(McParse, MetaDeleteWithFlags) {
     EXPECT_EQ(parse(input, &cmd, &consumed), McParseResult::OK);
     EXPECT_EQ(cmd.meta_flag_count, 1);
     EXPECT_EQ(cmd.meta_flags[0].data[0], 'q');
+}
+
+TEST(McParse, MetaDeleteTooManyFlagsRejected) {
+    McCommand cmd = {};
+    uint32_t consumed = 0;
+    std::string input = "md mykey";
+    for (int i = 0; i < MC_MAX_META_FLAGS + 1; i++)
+        input += " x";
+    input += "\r\n";
+
+    EXPECT_EQ(parse(input, &cmd, &consumed), McParseResult::ERROR);
 }
 
 // --- Meta NOOP ---

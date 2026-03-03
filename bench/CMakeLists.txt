@@ -36,3 +36,11 @@ target_link_libraries(redis_resp_bench PRIVATE
     dalahash_lib
     benchmark::benchmark
 )
+
+add_executable(memcached_protocol_bench
+    memcached_protocol_bench.cpp
+)
+target_link_libraries(memcached_protocol_bench PRIVATE
+    dalahash_lib
+    benchmark::benchmark
+)

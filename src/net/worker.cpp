@@ -957,7 +957,6 @@ int worker_run(WorkerConfig* config) {
     ASSERT(config->ops.submit_nodelay != nullptr, "ops.submit_nodelay is required");
     ASSERT(config->ops.wait != nullptr, "ops.wait is required");
     ASSERT(config->ops.destroy != nullptr, "ops.destroy is required");
-    ASSERT(!config->skip_setup || config->listen_fd >= 0, "skip_setup requires pre-created listen fd");
 
     int listen_fd = -1;
 
@@ -998,6 +997,7 @@ int worker_run(WorkerConfig* config) {
         .worker_count = config->worker_count,
     };
     protocol_worker_init(&protocol_state, &protocol_ctx);
+    ASSERT(!config->skip_setup || listen_fd >= 0, "skip_setup requires pre-created listen fd");
     IoCompletion completions[MAX_COMPLETIONS];
     WorkerState wstate = {};
     TxSlabPool tx_pool = {};

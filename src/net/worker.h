@@ -20,6 +20,7 @@ struct WorkerConfig {
     // When true, skip core pinning and listen socket creation (for DST).
     bool skip_setup = false;
     int listen_fd = -1; // pre-created listen fd when skip_setup is true
+    int exit_code = 0;
 };
 
 int worker_run(WorkerConfig* config);

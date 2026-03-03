@@ -187,6 +187,32 @@ TEST(DSTMemcached, MetaDelete) {
     connection_destroy(conn);
 }
 
+TEST(DSTMemcached, MetaNoop) {
+    ProtocolWorkerState state = {};
+    protocol_worker_init(&state);
+    Connection* conn = connection_create(10);
+    std::string data = "mn\r\n";
+    EXPECT_EQ(process_recv(conn, reinterpret_cast<const uint8_t*>(data.data()),
+                           static_cast<uint32_t>(data.size()), &state),
+              "MN\r\n");
+    connection_destroy(conn);
+}
+
+TEST(DSTMemcached, TooManyMetaFlagsIsProtocolError) {
+    ProtocolWorkerState state = {};
+    protocol_worker_init(&state);
+    Connection* conn = connection_create(10);
+    std::string data = "mg mykey";
+    for (int i = 0; i < MC_MAX_META_FLAGS + 1; i++)
+        data += " x";
+    data += "\r\n";
+
+    process_recv(conn, reinterpret_cast<const uint8_t*>(data.data()), static_cast<uint32_t>(data.size()),
+                 &state);
+    EXPECT_TRUE(conn->closing);
+    connection_destroy(conn);
+}
+
 TEST(DSTMemcached, SimBackendCapturesSend) {
     SimIoBackend sim;
     IoOps ops = sim_io_ops();

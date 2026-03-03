@@ -174,19 +174,22 @@ static McParseResult parse_legacy_delete(const uint8_t* data, uint32_t line_end,
 }
 
 // Parse meta flags after key for mg/md commands (no data block).
-static void parse_meta_flags(const uint8_t* data, uint32_t pos, uint32_t line_end, McCommand* cmd) {
+static bool parse_meta_flags(const uint8_t* data, uint32_t pos, uint32_t line_end, McCommand* cmd) {
     cmd->meta_flag_count = 0;
-    while (pos < line_end && cmd->meta_flag_count < MC_MAX_META_FLAGS) {
+    while (pos < line_end) {
         pos = skip_spaces(data, pos, line_end);
         if (pos >= line_end)
             break;
         McArg flag = {};
         pos = read_token(data, pos, line_end, &flag);
         if (flag.len > 0) {
+            if (cmd->meta_flag_count >= MC_MAX_META_FLAGS)
+                return false;
             cmd->meta_flags[cmd->meta_flag_count] = flag;
             cmd->meta_flag_count++;
         }
     }
+    return true;
 }
 
 // Parse "mg <key> [flags...]\r\n"
@@ -198,7 +201,8 @@ static McParseResult parse_meta_get(const uint8_t* data, uint32_t line_end, McCo
     if (cmd->key.len == 0)
         return McParseResult::ERROR;
 
-    parse_meta_flags(data, pos, line_end, cmd);
+    if (!parse_meta_flags(data, pos, line_end, cmd))
+        return McParseResult::ERROR;
     cmd->type = McCommandType::META_GET;
     return McParseResult::OK;
 }
@@ -223,7 +227,8 @@ static McParseResult parse_meta_set(const uint8_t* data, uint32_t len, uint32_t 
         return McParseResult::ERROR;
 
     // remaining tokens are meta flags
-    parse_meta_flags(data, pos, line_end, cmd);
+    if (!parse_meta_flags(data, pos, line_end, cmd))
+        return McParseResult::ERROR;
 
     // Data block — use 64-bit to prevent overflow with large cmd->bytes.
     uint64_t data_start = static_cast<uint64_t>(line_end) + 2;
@@ -249,7 +254,8 @@ static McParseResult parse_meta_delete(const uint8_t* data, uint32_t line_end, M
     if (cmd->key.len == 0)
         return McParseResult::ERROR;
 
-    parse_meta_flags(data, pos, line_end, cmd);
+    if (!parse_meta_flags(data, pos, line_end, cmd))
+        return McParseResult::ERROR;
     cmd->type = McCommandType::META_DELETE;
     return McParseResult::OK;
 }
