@@ -10,6 +10,46 @@ Current build-time protocol modes:
 - `memcached`: text `get`, `set`, `delete`, `version`, plus meta `mg`, `ms`, `md`, `mn`
 - `echo`: raw TCP echo
 
+## AI usage
+About 90% of the actual code and 95% of the tests, benchmarks and docs is written by AI agents. I have defined the architecture, the design of the networking and shared_kv_store but most of the actual code is written by these agents.
+I have used both `OpenAI GPT-5.3-Codex` (Plus subscription) and `Claude Opus 4.6` (Claude Pro subscription).
+
+## Redis [memtier](https://github.com/redis/memtier_benchmark) benchmarks
+
+The result are from running both the client(memtier_benchmark) and server(dalahash) on 2 seperate c8gn.16xlarge instances in the same AWS AZ (eu-north-1a) using a "spread" EC2 placement group.
+
+Ping latency between the client and server:
+```bash
+64 bytes from 172.31.24.133: icmp_seq=3 ttl=127 time=0.077 ms
+64 bytes from 172.31.24.133: icmp_seq=4 ttl=127 time=0.078 ms
+...
+```
+
+### Summary
+Using 30 threads and 30 clients per thread with a 256 byte data size a dalahash server is able to server **3.9M operations per second with an avg client latency of 230 µs and a p99.99 client latency of 823 µs** using a 90% get 10% set workload.
+
+With Redis pipelining dalahash can reach 18.8M operations per second, but at the cost of latency and high cpu usage. 
+
+**Note:** I did not spend a lot of time on these benchmarks, they are here to verify the design of the server and make sure the overall design can reach the performance I had in mind.
+
+#### 90% Get, 10% Set data
+```bash
+memtier_benchmark -s <server_ip> -p 6379 --ratio 1:10 --threads=30 --clients=30 --distinct-client-seed --test-time=180 --data-size=256
+```
+| Type   | Ops/sec    | Avg. Latency | p50 Latency | p90 Latency | p99 Latency | p99.9 Latency | p99.990 Latency |
+|--------|------------|--------------|-------------|-------------|-------------|---------------|-----------------|
+| Sets   | 354601.51  | 0.23192      | 0.21500     | 0.31100     | 0.49500     | 0.59900       | 0.82300         |
+| Gets   | 3545941.20 | 0.23037      | 0.21500     | 0.30300     | 0.49500     | 0.59100       | 0.82300         |
+| Totals | 3900542.71 | 0.23051      | 0.21500     | 0.31100     | 0.49500     | 0.59100       | 0.82300         |
+
+#### 90% Get, 10% Set with `--pipeline=30` data
+
+| Type   | Ops/sec     | Avg. Latency | p50 Latency | p90 Latency | p99 Latency | p99.9 Latency | p99.990 Latency |
+|--------|-------------|--------------|-------------|-------------|-------------|---------------|-----------------|
+| Sets   | 1713983.55  | 1.42169      | 1.36700     | 1.91100     | 2.52700     | 2.99100       | 3.27900         |
+| Gets   | 17139761.36 | 1.42957      | 1.37500     | 1.92700     | 2.52700     | 3.00700       | 3.27900         |
+| Totals | 18853744.91 | 1.42885      | 1.37500     | 1.92700     | 2.52700     | 3.00700       | 3.27900         |
+
 ## Prerequisites
 
 ```bash
