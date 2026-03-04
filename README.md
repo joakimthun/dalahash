@@ -150,6 +150,25 @@ At startup, `dalahash` creates one shared `KvStore`, then launches one worker th
 - `kv_store_quiescent()` is designed to be cheap most of the time: it usually just publishes epoch progress and returns, and only runs bounded maintenance when retire pressure builds or on a periodic cadence.
 - The store is fast because the hot GET/SET path avoids mutexes, keeps probing bounded, packs metadata + key + value into one allocation, uses copy-on-write publication, prefetches candidate buckets, samples `refbit` writes to reduce write amplification, and moves most reclamation work off the request path.
 
+### shared_kv_store benchmark performance (bench/shared_kv_multi_thread_bench.cpp)
+
+#### 100% get
+<p align="center">
+    <img src="/img/shared_kv_get_perf.svg" width="450" border="0" alt="get_100">
+</p>
+
+#### 95% get, 5% set
+Scales well up to 24 threads.
+<p align="center">
+    <img src="/img/shared_kv_mixed_perf_95_5.svg" width="450" border="0" alt="get_100">
+</p>
+
+#### 80% get, 20% set
+Scales well up to 8 threads.
+<p align="center">
+    <img src="/img/shared_kv_mixed_perf_80_20.svg" width="450" border="0" alt="get_100">
+</p>
+
 ### Memory management
 
 - `shared_kv_store` uses size-class pools for common node sizes (`64` through `32768` bytes). Each worker has small local caches in front of global lock-free class pools, which removes most allocator contention from the hot path. Oversized nodes fall back to exact-size `malloc()` / `free()`.
