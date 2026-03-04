@@ -67,6 +67,10 @@ KvSetStatus kv_store_set(KvStore *store, uint32_t worker_id,
                          uint64_t now_ms,
                          const KvSetOptions *opts);
 
+KvDeleteStatus kv_store_delete(KvStore *store, uint32_t worker_id,
+                               std::string_view key,
+                               uint64_t now_ms);
+
 uint64_t kv_store_live_bytes(const KvStore *store);
 uint64_t kv_store_capacity_bytes(const KvStore *store);
 
@@ -378,6 +382,7 @@ Top-level store fields:
 - `pending_retire_batches`
 - `over_capacity`
 - `maintenance_token`
+- `maintenance_started_ms`
 - `retire_queue_lock`
 - `retire_queue_head`
 - `retire_queue_tail`
@@ -396,6 +401,8 @@ Top-level store fields:
   - sticky hint that trim work is still needed
 - `maintenance_token`
   - only one worker may run maintenance at a time
+- `maintenance_started_ms`
+  - observability timestamp set while a worker is running maintenance
 - `retire_queue_lock`
   - small spinlock guarding the global retire queue
 
@@ -562,7 +569,7 @@ For up to 128 attempts:
 
 If all attempts fail:
 
-- optionally perform trim
+- perform best-effort trim
 - free `fresh` if allocated
 - return `OOM`
 
@@ -648,7 +655,7 @@ This prevents unbounded spinning in a pathological hot bucket.
 
 If the loop exhausts:
 
-- best-effort trim may still run
+- best-effort trim is still attempted
 - the operation returns `OOM`
 
 This means `OOM` can represent:
@@ -1461,7 +1468,16 @@ Performs:
 - retirement of replaced/removed nodes
 - optional trim
 
-## 16.5 `kv_store_quiescent`
+## 16.5 `kv_store_delete`
+
+Performs:
+
+- bounded 2-bucket/4-lane probe with up to 128 retries under CAS contention
+- CAS unpublish of the matching key (`slot -> nullptr`)
+- local accounting delta update and deferred retirement on successful delete
+- expired-key handling aligned with `get`: lazy unlink and `NOT_FOUND` return
+
+## 16.6 `kv_store_quiescent`
 
 Performs:
 
@@ -1472,7 +1488,7 @@ Performs:
 
 In the intended steady state, this is usually a cheap fast-return function.
 
-## 16.6 `kv_store_destroy`
+## 16.7 `kv_store_destroy`
 
 Performs synchronous, full cleanup.
 
