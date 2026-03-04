@@ -10,7 +10,7 @@ Current build-time protocol modes:
 - `memcached`: text `get`, `set`, `delete`, `version`, plus meta `mg`, `ms`, `md`, `mn`
 - `echo`: raw TCP echo
 
-`dalahash` does **not** support (as of right now and probably never) the full set of redis and/or memcached operations/features.
+`dalahash` does **not** support (as of right now and probably never) the full set of redis and/or memcached operations/features. It is a project for fun and to learn working with AI agents.
 
 ## AI usage
 About 90% of the actual code and 95% of the tests, benchmarks and docs is written by AI agents. I have defined the architecture, the design of the networking and shared_kv_store but most of the actual code is written by these agents.
