@@ -139,6 +139,7 @@ CLI notes:
 
 - `--workers 0` means auto-detect from `_SC_NPROCESSORS_ONLN`.
 - Invalid `--workers`, `--port`, and `--store-bytes` values fail fast with exit code `1`.
+- Startup may reduce worker count and per-worker fixed-file slots to fit `RLIMIT_NOFILE`.
 
 ## Quick Manual Client Checks
 
@@ -253,7 +254,7 @@ ctest --test-dir build --output-on-failure -R '^(DST|DSTIntegration)\.'
 ctest --test-dir build --output-on-failure -R '^IoUringIntegrationTest\.'
 
 # Redis fuzz tests
-ctest --test-dir build --output-on-failure -R '^Fuzz\.'
+ctest --test-dir build --output-on-failure -R '^FuzzTest\.'
 
 # Echo DST tests
 ctest --test-dir build --output-on-failure -R '^EchoDST\.'
@@ -268,10 +269,10 @@ ctest --test-dir build --output-on-failure -R '^(McParse|McCommand)\.'
 ctest --test-dir build --output-on-failure -R '^DSTMemcached\.'
 
 # Memcached integration tests
-ctest --test-dir build --output-on-failure -R '^MemcachedIntegration\.'
+ctest --test-dir build --output-on-failure -R '^MemcachedIntegrationTest\.'
 
 # Memcached fuzz tests
-ctest --test-dir build --output-on-failure -R '^MemcachedFuzz\.'
+ctest --test-dir build --output-on-failure -R '^MemcachedFuzzTest\.'
 ```
 
 ### Test binaries
@@ -308,10 +309,10 @@ Each worker thread is pinned to one CPU core (`pthread_setaffinity_np`). Each wo
 
 - One `io_uring` ring (`IORING_SETUP_SINGLE_ISSUER`)
 - One listen socket with `SO_REUSEPORT`
-- One `Connection* conns[MAX_CONNECTIONS]` table indexed by fixed-file index
+- One `Connection* conns[MAX_CONNECTIONS]` table indexed by fixed-file index (active range is bounded by per-worker fixed-file capacity)
 - One protocol worker state object
 
-`server.cpp` creates one shared `KvStore` in `server_start()` and passes that shared store to every worker. In Redis and memcached builds, `protocol_worker_init(...)` binds each worker's local `Store` wrapper to that shared `KvStore` and registers the worker id, so keys are visible across workers.
+`server.cpp` creates one shared `KvStore` in `server_start_with_runtime()` and passes that shared store to every worker. In Redis and memcached builds, `protocol_worker_init(...)` binds each worker's local `Store` wrapper to that shared `KvStore` and registers the worker id, so keys are visible across workers.
 
 ### Protocol seam
 
@@ -321,11 +322,12 @@ Each worker thread is pinned to one CPU core (`pthread_setaffinity_np`). Each wo
 - `DALAHASH_PROTOCOL_MEMCACHED=1`
 - `DALAHASH_PROTOCOL_ECHO=1`
 
-Worker hot paths call:
+Worker lifecycle calls:
 
+- `protocol_worker_init(...)`
+- `protocol_worker_quiescent(...)`
 - `protocol_parse(...)`
 - `protocol_execute(...)`
-- `protocol_worker_init(...)`
 
 ### io_uring setup flags
 
@@ -343,7 +345,7 @@ Current startup constants in `src/net/server.cpp`:
 
 ### Fixed file table
 
-- `io_uring_register_files_sparse(MAX_CONNECTIONS)` pre-registers the fixed file table.
+- `io_uring_register_files_sparse(fixed_files_per_worker)` pre-registers the fixed file table (`fixed_files_per_worker` is clamped by `RLIMIT_NOFILE` and `MAX_CONNECTIONS`).
 - `io_uring_prep_multishot_accept_direct(..., IORING_FILE_INDEX_ALLOC)` allocates fixed-file slots directly.
 - Accept completions return the fixed-file index, not the OS fd.
 - Send/recv submissions use `IOSQE_FIXED_FILE`.
@@ -436,4 +438,5 @@ Current startup constants in `src/net/server.cpp`:
 - `-fno-exceptions` is mandatory.
 - Shared KV uses the single implementation in `src/kv/shared_kv_store.cpp`.
 - All workers share one `KvStore`; do not assume per-worker key isolation.
+- Startup can reduce workers and per-worker fixed-file slots to fit `RLIMIT_NOFILE`.
 - Only close-submit `-ENOSPC` is retried; other close-submit failures are treated as terminal.
