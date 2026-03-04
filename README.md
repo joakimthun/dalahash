@@ -2,9 +2,7 @@
     <img src="/img/dalahash_logo_small.png" width="450" border="0" alt="dalahash logo">
 </p>
 
-# dalahash
-
-`dalahash` is a C++23 in-memory data store built for high-throughput, low-latency serving on Linux. It uses a thread-per-core `io_uring` server, shares one mostly lock-free key/value store across all workers, and selects its wire protocol at build time.
+`dalahash` (terrible pun on [Dalahäst](https://en.wikipedia.org/wiki/Dala_horse)) is an in-memory data store built for high-throughput, low-latency serving on Linux. It uses a thread-per-core `io_uring` server, shares one mostly lock-free key/value store across all workers, and selects its wire protocol at build time.
 
 Current build-time protocol modes:
 
@@ -163,7 +161,7 @@ Run them:
 ./build/bench/memcached_protocol_bench
 ```
 
-End-to-end benchmark (requires `memtier` and a running server):
+End-to-end benchmark (requires [memtier](https://github.com/redis/memtier_benchmark) and a running server):
 
 ```bash
 bash bench/run_benchmark.sh              # Redis mode
