@@ -1,6 +1,7 @@
 build/
 build-*/
 build_*/
+temp/
 bench/results/
 *__pycache__/
 *.local.json
