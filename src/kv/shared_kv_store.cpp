@@ -914,17 +914,32 @@ KvStore* kv_store_create(const KvStoreConfig* config) {
     ASSERT(shard_count > 0, "shard_count must be non-zero");
     ASSERT((shard_count & (shard_count - 1u)) == 0, "shard_count must be power of two");
 
+    // next_pow2_u32 overflows for inputs > 2^31, so clamp all derived values.
+    static constexpr uint64_t MAX_POW2_U32_INPUT = (1ull << 31);
+
     uint32_t buckets_per_shard = config->buckets_per_shard;
     if (buckets_per_shard == 0) {
-        uint64_t total_buckets = capacity / 256u;
-        if (total_buckets < 64)
-            total_buckets = 64;
-        uint64_t per_shard = total_buckets / shard_count;
-        if (per_shard < 16)
-            per_shard = 16;
-        if (per_shard > UINT32_MAX)
-            per_shard = UINT32_MAX;
-        buckets_per_shard = next_pow2_u32(static_cast<uint32_t>(per_shard));
+        if (config->max_items != 0) {
+            // Keep shard_count policy unchanged; derive bucket geometry only.
+            uint64_t slots_per_added_bucket = static_cast<uint64_t>(shard_count) * KV_BUCKET_SLOTS;
+            ASSERT(slots_per_added_bucket > 0, "slots_per_added_bucket must be non-zero");
+            uint64_t per_shard = (config->max_items + slots_per_added_bucket - 1u) / slots_per_added_bucket;
+            if (per_shard == 0)
+                per_shard = 1;
+            if (per_shard > MAX_POW2_U32_INPUT)
+                per_shard = MAX_POW2_U32_INPUT;
+            buckets_per_shard = next_pow2_u32(static_cast<uint32_t>(per_shard));
+        } else {
+            uint64_t total_buckets = capacity / 256u;
+            if (total_buckets < 64)
+                total_buckets = 64;
+            uint64_t per_shard = total_buckets / shard_count;
+            if (per_shard < 16)
+                per_shard = 16;
+            if (per_shard > MAX_POW2_U32_INPUT)
+                per_shard = MAX_POW2_U32_INPUT;
+            buckets_per_shard = next_pow2_u32(static_cast<uint32_t>(per_shard));
+        }
     } else {
         buckets_per_shard = next_pow2_u32(buckets_per_shard);
     }

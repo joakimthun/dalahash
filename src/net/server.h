@@ -7,9 +7,10 @@
 #include <cstdint>
 
 struct ServerConfig {
-    uint16_t port;        // default: 6379
-    int num_workers;      // 0 = auto-detect
-    uint64_t store_bytes; // shared store memory cap
+    uint16_t port;                // default: 6379
+    int num_workers;              // 0 = auto-detect
+    uint64_t store_bytes;         // shared store memory cap
+    uint64_t store_max_items = 0; // 0 = derive from store_bytes/default geometry
 };
 
 using ServerBackendCreateFn = IoBackend* (*)(uint32_t ring_size, uint32_t buf_count, uint32_t buf_size,

@@ -48,6 +48,37 @@ TEST(SharedKvApi, NonPowerOfTwoConfigIsAccepted) {
     kv_store_destroy(s);
 }
 
+TEST(SharedKvApi, MaxItemsLimitsResidentKeys) {
+    KvStoreConfig cfg = {
+        .capacity_bytes = 128ull << 20,
+        .shard_count = 0,
+        .buckets_per_shard = 0,
+        .max_items = 1024,
+        .worker_count = 1,
+    };
+    KvStore* s = kv_store_create(&cfg);
+    ASSERT_NE(s, nullptr);
+    ASSERT_EQ(kv_store_register_worker(s, 0), 0);
+
+    for (uint32_t i = 0; i < 4096; i++) {
+        std::string key = "k:" + std::to_string(i);
+        ASSERT_EQ(kv_store_set(s, 0, key, "v", 1000 + i, nullptr), KvSetStatus::OK);
+    }
+
+    uint32_t hits = 0;
+    KvValueView out = {};
+    for (uint32_t i = 0; i < 4096; i++) {
+        std::string key = "k:" + std::to_string(i);
+        if (kv_store_get(s, 0, key, 100000, &out) == KvGetStatus::HIT)
+            hits++;
+    }
+
+    EXPECT_GT(hits, 0u);
+    EXPECT_LE(hits, 1024u);
+
+    kv_store_destroy(s);
+}
+
 TEST(SharedKvApi, RegisterWorkerRangeValidation) {
     KvStoreConfig cfg = {
         .capacity_bytes = 1ull << 20,

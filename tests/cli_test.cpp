@@ -21,7 +21,7 @@ struct CliParseOutput {
 static CliParseOutput parse_args(std::initializer_list<const char*> args) {
     CliParseOutput out = {
         .result = CliParseResult::ERROR,
-        .config = {.port = 6379, .num_workers = 0, .store_bytes = 256ull << 20},
+        .config = {.port = 6379, .num_workers = 0, .store_bytes = 256ull << 20, .store_max_items = 0},
         .error_message = nullptr,
         .error_arg = nullptr,
         .storage = {},
@@ -46,12 +46,14 @@ TEST(Cli, DefaultsRemainWhenNoArgsProvided) {
     EXPECT_EQ(out.config.port, 6379);
     EXPECT_EQ(out.config.num_workers, 0);
     EXPECT_EQ(out.config.store_bytes, 256ull << 20);
+    EXPECT_EQ(out.config.store_max_items, 0u);
 }
 
 TEST(Cli, HelpReturnsHelpStatus) {
     CliParseOutput out = parse_args({"dalahash", "--help"});
     EXPECT_EQ(out.result, CliParseResult::HELP);
-    EXPECT_STREQ(cli_usage(), "Usage: dalahash [--port PORT] [--workers N] [--store-bytes BYTES]");
+    EXPECT_STREQ(cli_usage(),
+                 "Usage: dalahash [--port PORT] [--workers N] [--store-bytes BYTES] [--store-max-items N]");
 }
 
 TEST(Cli, ParsesValidWorkersZero) {
@@ -100,6 +102,33 @@ TEST(Cli, RejectsNegativeStoreBytes) {
     EXPECT_EQ(out.result, CliParseResult::ERROR);
     ASSERT_NE(out.error_message, nullptr);
     EXPECT_STREQ(out.error_message, "Invalid --store-bytes value");
+}
+
+TEST(Cli, ParsesStoreMaxItems) {
+    CliParseOutput out = parse_args({"dalahash", "--store-max-items", "4194304"});
+    EXPECT_EQ(out.result, CliParseResult::OK);
+    EXPECT_EQ(out.config.store_max_items, 4194304u);
+}
+
+TEST(Cli, RejectsZeroStoreMaxItems) {
+    CliParseOutput out = parse_args({"dalahash", "--store-max-items", "0"});
+    EXPECT_EQ(out.result, CliParseResult::ERROR);
+    ASSERT_NE(out.error_message, nullptr);
+    EXPECT_STREQ(out.error_message, "Invalid --store-max-items value");
+}
+
+TEST(Cli, RejectsNegativeStoreMaxItems) {
+    CliParseOutput out = parse_args({"dalahash", "--store-max-items", "-1"});
+    EXPECT_EQ(out.result, CliParseResult::ERROR);
+    ASSERT_NE(out.error_message, nullptr);
+    EXPECT_STREQ(out.error_message, "Invalid --store-max-items value");
+}
+
+TEST(Cli, RejectsMissingStoreMaxItemsValue) {
+    CliParseOutput out = parse_args({"dalahash", "--store-max-items"});
+    EXPECT_EQ(out.result, CliParseResult::ERROR);
+    ASSERT_NE(out.error_message, nullptr);
+    EXPECT_STREQ(out.error_message, "Invalid --store-max-items value");
 }
 
 TEST(Cli, RejectsZeroPort) {

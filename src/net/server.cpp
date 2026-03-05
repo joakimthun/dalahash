@@ -191,6 +191,7 @@ int server_start_with_runtime(const ServerConfig* config, const IoOps* ops,
         .capacity_bytes = config->store_bytes,
         .shard_count = 0,
         .buckets_per_shard = 0,
+        .max_items = config->store_max_items,
         .worker_count = static_cast<uint32_t>(num_workers),
     };
     KvStore* shared_store = kv_store_create(&store_cfg);

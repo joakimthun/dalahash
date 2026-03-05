@@ -98,11 +98,14 @@ Optional toggles: `-DENABLE_ASAN=ON`, `-DENABLE_LSAN=ON`, `-DENABLE_BENCHMARKS=O
 # Custom configuration
 ./build/dalahash --port 6380 --workers 4 --store-bytes $((512 * 1024 * 1024))
 
+# Cap store geometry by max active slot-resident items (shards stay auto-selected)
+./build/dalahash --store-max-items 4194304
+
 # Help
 ./build/dalahash --help
 ```
 
-`--workers 0` means auto-detect from online CPUs. Invalid values for `--workers`, `--port`, or `--store-bytes` fail fast with exit code `1`.
+`--workers 0` means auto-detect from online CPUs. Invalid values for `--workers`, `--port`, `--store-bytes`, or `--store-max-items` fail fast with exit code `1`.
 
 Quick manual checks (Redis mode):
 
@@ -152,7 +155,52 @@ At startup, `dalahash` creates one shared `KvStore`, then launches one worker th
 - `kv_store_quiescent()` is designed to be cheap most of the time: it usually just publishes epoch progress and returns, and only runs bounded maintenance when retire pressure builds or on a periodic cadence.
 - The store is fast because the hot GET/SET path avoids mutexes, keeps probing bounded, packs metadata + key + value into one allocation, uses copy-on-write publication, prefetches candidate buckets, samples `refbit` writes to reduce write amplification, and moves most reclamation work off the request path.
 
-### shared_kv_store benchmark performance (bench/shared_kv_multi_thread_bench.cpp)
+#### GET path example (`kv_store_get`)
+
+Below is a concrete example of how one `GET` executes.
+
+Step-by-step:
+1. Compute a 64-bit hash of the key.
+2. Pick shard from high hash bits: `shard_idx = (hash >> 32) & shard_mask`.
+3. Pick two candidate buckets inside that shard:
+   - `b1 = low32(hash) & bucket_mask`
+   - `b2 = secondary_bucket(hash, bucket_mask, b1)`
+4. Prefetch both buckets and probe at most 8 slots total (`2 buckets * 4 lanes`).
+5. For each slot, load `Node*` atomically and check in order:
+   - empty slot -> continue
+   - hash mismatch -> continue
+   - key mismatch -> continue
+   - key match + expired -> try CAS slot to `nullptr`, retire node, return `MISS`
+   - key match + not expired -> return `HIT` with view into node value bytes
+6. On hit, update the sampled `refbit` only every 8th touch on that worker.
+7. If no matching node is found in the 8 probes, return `MISS`.
+
+ASCII view:
+
+```text
+KvStore
+  |
+  +-- hash("user:42") -> 64-bit h
+  |
+  +-- shard_idx = (h >> 32) & shard_mask
+       |
+       +-- shard.slots[]  // flat array, bucket-major
+            |
+            +-- bucket b1: [lane0][lane1][lane2][lane3]
+            |
+            +-- bucket b2: [lane0][lane1][lane2][lane3]
+
+Probe order (bounded):
+  b1/lane0 -> b1/lane1 -> b1/lane2 -> b1/lane3 ->
+  b2/lane0 -> b2/lane1 -> b2/lane2 -> b2/lane3
+
+Possible outcomes:
+  - Found matching live node  -> HIT (out points into node value bytes)
+  - Found matching expired    -> CAS-to-null + retire + MISS
+  - Found nothing in 8 probes -> MISS
+```
+
+### shared_kv_store benchmark performance (bench/shared_kv_multi_thread_bench.cpp) on a c8gn.16xlarge
 
 #### 100% get
 <p align="center">

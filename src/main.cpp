@@ -9,7 +9,7 @@
 int main(int argc, char** argv) {
     ASSERT(argc >= 0, "argc must be non-negative");
     ASSERT(argv != nullptr || argc == 0, "argv is null with non-zero argc");
-    ServerConfig config = {.port = 6379, .num_workers = 0, .store_bytes = 256ull << 20};
+    ServerConfig config = {.port = 6379, .num_workers = 0, .store_bytes = 256ull << 20, .store_max_items = 0};
 
     const char* error_message = nullptr;
     const char* error_arg = nullptr;

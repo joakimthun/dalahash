@@ -128,6 +128,9 @@ clang-format-21 -i src/foo.cpp src/foo.h
 # Custom shared store capacity
 ./build/dalahash --store-bytes $((512 * 1024 * 1024))
 
+# Target max active slot-resident items (keeps shard auto-selection policy)
+./build/dalahash --store-max-items 4194304
+
 # Custom port + workers + store capacity
 ./build/dalahash --port 6380 --workers 1 --store-bytes $((128 * 1024 * 1024))
 
@@ -138,7 +141,7 @@ clang-format-21 -i src/foo.cpp src/foo.h
 CLI notes:
 
 - `--workers 0` means auto-detect from `_SC_NPROCESSORS_ONLN`.
-- Invalid `--workers`, `--port`, and `--store-bytes` values fail fast with exit code `1`.
+- Invalid `--workers`, `--port`, `--store-bytes`, and `--store-max-items` values fail fast with exit code `1`.
 - Startup may reduce worker count and per-worker fixed-file slots to fit `RLIMIT_NOFILE`.
 
 ## Quick Manual Client Checks
@@ -385,7 +388,7 @@ Current startup constants in `src/net/server.cpp`:
 | File | Purpose |
 |---|---|
 | `src/main.cpp` | Main entrypoint |
-| `src/cli.h` | CLI parsing for `--port`, `--workers`, `--store-bytes`, `--help` |
+| `src/cli.h` | CLI parsing for `--port`, `--workers`, `--store-bytes`, `--store-max-items`, `--help` |
 | `src/net/server.cpp` | Worker startup, shared-store creation, signal handling |
 | `src/net/server.h` | Server config and testable runtime seam |
 | `src/net/worker.cpp` | Per-worker event loop, recv/parse/execute/send path |

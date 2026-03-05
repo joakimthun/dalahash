@@ -72,6 +72,13 @@ struct KvStoreConfig {
     // Buckets per shard (rounded to power-of-two).
     // 0 => implementation chooses based on capacity.
     uint32_t buckets_per_shard;
+    // Target upper bound for slot-resident item count.
+    // 0 => disabled.
+    //
+    // Applied only when buckets_per_shard == 0.
+    // The implementation keeps shard_count selection unchanged and derives
+    // buckets_per_shard to satisfy this target as closely as possible.
+    uint64_t max_items = 0;
     // Expected number of worker threads calling get/set/quiescent.
     // 0 => treated as 1.
     uint32_t worker_count;
