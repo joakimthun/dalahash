@@ -16,6 +16,9 @@ Current build-time protocol modes:
 About 90% of the actual code and 95% of the tests, benchmarks and docs is written by AI agents. I have defined the architecture, the design of the networking and shared_kv_store but most of the actual code is written by these agents.
 I have used both `OpenAI GPT-5.3-Codex` (Plus subscription) and `Claude Opus 4.6` (Claude Pro subscription).
 
+Using AI coding agents on this project usually works very well and speeds up implementation, debugging, and test iteration **SIGNIFICANTLY**.
+At the same time, [these notes](USING_AI_AGENT_SUMMARY.md) show there are still clear issues as of March 2026.
+
 ## Redis [memtier](https://github.com/redis/memtier_benchmark) benchmarks
 
 The result are from running both the client(memtier_benchmark) and server(dalahash) on 2 seperate c8gn.16xlarge instances in the same AWS AZ (eu-north-1a) using a "spread" EC2 placement group.
