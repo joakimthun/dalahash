@@ -20,13 +20,6 @@ I have used both `OpenAI GPT-5.3-Codex` (Plus subscription) and `Claude Opus 4.6
 
 The result are from running both the client(memtier_benchmark) and server(dalahash) on 2 seperate c8gn.16xlarge instances in the same AWS AZ (eu-north-1a) using a "spread" EC2 placement group.
 
-Ping latency between the client and server:
-```bash
-64 bytes from 172.31.24.133: icmp_seq=3 ttl=127 time=0.077 ms
-64 bytes from 172.31.24.133: icmp_seq=4 ttl=127 time=0.078 ms
-...
-```
-
 ### Summary
 Using 30 threads and 30 clients per thread with a 256 byte data size a dalahash server is able to server **3.9M operations per second with an avg client latency of 230 µs and a p99.99 client latency of 823 µs** using a 90% get 10% set workload.
 
