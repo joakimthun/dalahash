@@ -2,7 +2,7 @@
 
 ## Summary of experience
 
-Using AI coding agents on this project usually works very well and speeds up implementation, debugging, and test iteration significantly.  
+Using AI coding agents on this project usually works very well and speeds up implementation, debugging, and test iteration **SIGNIFICANTLY**.
 At the same time, these notes show why careful human review is required before merge: plausible explanations, partial fixes, and even passing tests can still hide correctness and performance problems.
 
 ## Why strict review is required
