@@ -12,7 +12,7 @@ At the same time, these notes show why careful human review is required before m
 - Root-cause conclusions can be premature when benchmark variants are not fully explored.
 - Cross-agent review helps, but ping-pong review cycles can still miss edge cases.
 
-## Concrete issues
+## A few examples of concrete issues
 
 ### Issue 1: Critical buffer lifetime issues in code
 
